@@ -1,0 +1,4 @@
+node_modules
+.expo
+.turbo
+package-lock.json

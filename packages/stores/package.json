@@ -1,0 +1,13 @@
+{
+  "name": "@docchat/stores",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@docchat/types": "*",
+    "@docchat/supabase": "*",
+    "zustand": "^4.5.2",
+    "immer": "^10.1.1"
+  }
+}
