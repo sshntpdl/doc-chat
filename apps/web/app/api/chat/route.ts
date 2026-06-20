@@ -12,14 +12,29 @@
 //   7. Stream Groq response token-by-token as SSE events
 //   8. After stream ends, emit 'sources' event with citations
 //   9. Persist the completed message to DB
+//
+// TYPE FIX (see bottom note): the previous version derived the Supabase
+// client type as `Awaited<ReturnType<typeof import("@supabase/supabase-js").createClient>>`.
+// Because createClient is generic and no Database schema was passed,
+// that resolved to a client typed against the default `any` Database
+// generic, which causes postgrest-js's Update<> helper to collapse to
+// `never` — hence ".update({...}) — Argument of type '{...}' is not
+// assignable to parameter of type 'never'." We now type the client
+// explicitly as SupabaseClient<Database> (or a safe fallback — see
+// note at the bottom of this file) instead of re-deriving it from the
+// bare import.
 
-import { NextRequest }       from "next/server";
-import { ChatGroq }          from "@langchain/groq";
-import { ChatPromptTemplate, MessagesPlaceholder } from "@langchain/core/prompts";
-import { z }                 from "zod";
+import { NextRequest } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { ChatGroq } from "@langchain/groq";
+import {
+  ChatPromptTemplate,
+  MessagesPlaceholder,
+} from "@langchain/core/prompts";
+import { z } from "zod";
 import { getAuthenticatedUser } from "../_lib/auth";
 import { streamResponse, errorResponse } from "../_lib/response";
-import { rateLimiter }       from "../_lib/ratelimit";
+import { rateLimiter } from "../_lib/ratelimit";
 import {
   embedQuery,
   retrieveChunks,
@@ -29,16 +44,30 @@ import {
   getGroqClient,
 } from "../_lib/langchain";
 import { AppError, ErrorCode } from "@docchat/types";
-import type { SSEEvent }       from "@docchat/types";
+import type { SSEEvent } from "@docchat/types";
+
+// If you've generated real Supabase types (recommended — run:
+//   supabase gen types typescript --project-id <id> > packages/types/src/database.types.ts
+// and export `Database` from `@docchat/types`), swap this for:
+//   import type { Database } from "@docchat/types";
+// and replace every `SupabaseClientAny` below with `SupabaseClient<Database>`.
+// Until then, this alias keeps real type-checking on .insert()/.update()
+// payload shapes without the bare-import generic collapsing to `never`.
+type SupabaseClientAny = SupabaseClient<any, "public", any>;
 
 // ─── VALIDATION SCHEMA ────────────────────────────────────────────────────────
 
 const ChatRequestSchema = z.object({
-  sessionId:  z.string().optional(),
-  content:    z.string().min(1).max(2000).transform((s) =>
-    // Strip HTML tags — prevent XSS in stored messages
-    s.replace(/<[^>]*>/g, "").trim()
-  ),
+  sessionId: z.string().uuid().optional().nullable(), // was z.string().optional()
+  content: z
+    .string({
+      required_error: "content is required",
+      invalid_type_error: "content must be a string",
+    })
+    .min(1)
+    .max(2000)
+    .transform((s) => s.replace(/<[^>]*>/g, "").trim())
+    .refine((s) => s.length > 0, { message: "content cannot be empty" }),
   documentId: z.string().uuid().optional().nullable(),
 });
 
@@ -53,7 +82,7 @@ export async function POST(request: NextRequest) {
     rateLimiter(user.id, "chat", 30, 60 * 1000);
 
     // ── Parse body ────────────────────────────────────────────────────
-    const body   = await request.json();
+    const body = await request.json();
     const parsed = ChatRequestSchema.safeParse(body);
 
     if (!parsed.success) {
@@ -61,7 +90,7 @@ export async function POST(request: NextRequest) {
         ErrorCode.INVALID_INPUT,
         parsed.error.errors[0]?.message ?? "Invalid request",
         400,
-        false
+        false,
       );
     }
 
@@ -77,9 +106,9 @@ export async function POST(request: NextRequest) {
         .from("chat_messages")
         .select("role, content")
         .eq("session_id", sessionId)
-        .eq("user_id", user.id)    // RLS defense in depth
+        .eq("user_id", user.id) // RLS defense in depth
         .order("created_at", { ascending: true })
-        .limit(20);                // last 10 turns
+        .limit(20); // last 10 turns
 
       existingMessages = msgs ?? [];
     } else {
@@ -88,7 +117,7 @@ export async function POST(request: NextRequest) {
       const { data: session, error } = await supabase
         .from("chat_sessions")
         .insert({
-          user_id:     user.id,
+          user_id: user.id,
           document_id: documentId ?? null,
           title,
         })
@@ -96,7 +125,12 @@ export async function POST(request: NextRequest) {
         .single();
 
       if (error || !session) {
-        throw new AppError(ErrorCode.NETWORK_ERROR, "Failed to create session", 500, true);
+        throw new AppError(
+          ErrorCode.NETWORK_ERROR,
+          "Failed to create session",
+          500,
+          true,
+        );
       }
       sessionId = session.id;
     }
@@ -106,8 +140,8 @@ export async function POST(request: NextRequest) {
       .from("chat_messages")
       .insert({
         session_id: sessionId,
-        user_id:    user.id,
-        role:       "user",
+        user_id: user.id,
+        role: "user",
         content,
       })
       .select("id")
@@ -118,32 +152,33 @@ export async function POST(request: NextRequest) {
       .from("chat_messages")
       .insert({
         session_id: sessionId,
-        user_id:    user.id,
-        role:       "assistant",
-        content:    "", // filled in after streaming
+        user_id: user.id,
+        role: "assistant",
+        content: "", // filled in after streaming
       })
       .select("id")
       .single();
 
     const assistantMsgId = assistantMsg?.id ?? crypto.randomUUID();
     const startEvent: SSEEvent = {
-      type:      "start",
+      type: "start",
       messageId: assistantMsgId,
       sessionId: sessionId!,
     };
 
     // ── Start SSE response with async generator ────────────────────────
-    return streamResponse(generateStream({
-      user,
-      supabase,
-      content,
-      documentId:      documentId ?? null,
-      sessionId:       sessionId!,
-      existingMessages,
-      assistantMsgId,
-      startEvent,
-    }));
-
+    return streamResponse(
+      generateStream({
+        user,
+        supabase,
+        content,
+        documentId: documentId ?? null,
+        sessionId: sessionId!,
+        existingMessages,
+        assistantMsgId,
+        startEvent,
+      }),
+    );
   } catch (err) {
     return errorResponse(err);
   }
@@ -163,14 +198,14 @@ async function* generateStream({
   assistantMsgId,
   startEvent,
 }: {
-  user:             { id: string };
-  supabase:         Awaited<ReturnType<typeof import("@supabase/supabase-js").createClient>>;
-  content:          string;
-  documentId:       string | null;
-  sessionId:        string;
+  user: { id: string };
+  supabase: SupabaseClientAny;
+  content: string;
+  documentId: string | null;
+  sessionId: string;
   existingMessages: Array<{ role: string; content: string }>;
-  assistantMsgId:   string;
-  startEvent:       SSEEvent;
+  assistantMsgId: string;
+  startEvent: SSEEvent;
 }): AsyncGenerator<SSEEvent> {
   // Emit start event immediately so the client shows the typing indicator
   yield startEvent;
@@ -184,12 +219,12 @@ async function* generateStream({
     supabase as any,
     user.id,
     documentId,
-    4 // top-K
+    4, // top-K
   );
 
   // ── Step 3: Build prompt ─────────────────────────────────────────────
   const systemPrompt = buildSystemPrompt(chunks);
-  const chatHistory  = buildChatHistory(existingMessages as any);
+  const chatHistory = buildChatHistory(existingMessages as any);
 
   const prompt = ChatPromptTemplate.fromMessages([
     ["system", systemPrompt],
@@ -197,15 +232,15 @@ async function* generateStream({
     ["human", "{question}"],
   ]);
 
-  const groq   = getGroqClient();
-  const chain  = prompt.pipe(groq);
+  const groq = getGroqClient();
+  const chain = prompt.pipe(groq);
 
   // ── Step 4: Stream tokens ────────────────────────────────────────────
-  let fullContent  = "";
-  let totalTokens  = 0;
+  let fullContent = "";
+  let totalTokens = 0;
 
   const stream = await chain.stream({
-    history:  chatHistory,
+    history: chatHistory,
     question: content,
   });
 

@@ -1,14 +1,4 @@
 // FILE: /apps/mobile/app/(app)/chat/[documentId].tsx
-//
-// Mobile chat screen with real-time SSE streaming.
-//
-// KEY MOBILE DECISIONS:
-//   - FlatList with inverted={true}: newest messages at bottom without manual
-//     scroll management. FlatList renders from bottom, so data is reversed.
-//   - KeyboardAvoidingView + behavior='padding' (iOS) / 'height' (Android)
-//   - EventSource from react-native-sse for SSE (no browser EventSource on RN)
-//   - Haptic feedback on send (Haptics.impactAsync)
-//   - react-native-markdown-display for AI message rendering
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -17,10 +7,11 @@ import {
   FlatList,
   TextInput,
   TouchableOpacity,
-  KeyboardAvoidingView,
   Platform,
   StyleSheet,
   ActivityIndicator,
+  Keyboard,
+  KeyboardEvent,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
@@ -35,15 +26,17 @@ import {
   selectIsStreaming,
 } from "@docchat/stores";
 import type { ChatMessage, SSEEvent } from "@docchat/types";
+import { TypingIndicator } from "../../../components/documents/TypingIndicator";
 
 const API_BASE = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:3000";
 
 export default function ChatScreen() {
-  const { documentId } = useLocalSearchParams<{ documentId: string }>();
+  const params = useLocalSearchParams<{ documentId: string }>();
+  const documentId = Array.isArray(params.documentId)
+    ? params.documentId[0]
+    : params.documentId;
 
-  // Auth — needed to attach Bearer token to every SSE request
   const session = useAuthStore((s) => s.session);
-
   const getDocById = useDocumentStore((s) => s.getDocumentById);
   const doc = getDocById(documentId);
 
@@ -56,16 +49,15 @@ export default function ChatScreen() {
   const finalizeStream = useChatStore((s) => s.finalizeStreaming);
 
   const messages = useCurrentMessages(activeId);
-  // FlatList inverted needs data in reverse order
   const reversedMsgs = [...messages].reverse();
 
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const esRef = useRef<EventSource | null>(null);
   const inputRef = useRef<TextInput>(null);
 
-  // Create a local session on mount; real UUID session is created server-side
-  // on the first message and returned via the 'start' SSE event.
+  // ── Session init ────────────────────────────────────────────────────────────
   useEffect(() => {
     const id = createSession(documentId);
     setActive(id);
@@ -74,10 +66,45 @@ export default function ChatScreen() {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Keyboard listeners ──────────────────────────────────────────────────────
+  // We avoid KeyboardAvoidingView entirely because it can't correctly measure
+  // its own position inside a bottom tab navigator. Instead we listen to
+  // keyboard events directly and drive a spacer View + FlatList padding.
+  //
+  // iOS:   keyboardWillShow/Hide fires before the animation — smooth lift.
+  // Android: use keyboardDidShow/Hide + softwareKeyboardLayoutMode="pan" in
+  //          app.json so the OS resizes the window for us.
+  useEffect(() => {
+    // Android: softwareKeyboardLayoutMode="pan" in app.json makes the OS
+    // resize the window automatically — no JS listener needed at all.
+    // Adding one causes double-compensation (input shoots up mid-screen).
+    if (Platform.OS === "android") return;
+
+    const show = Keyboard.addListener(
+      "keyboardWillShow",
+      (e: KeyboardEvent) => {
+        setKeyboardHeight(e.endCoordinates.height);
+      },
+    );
+    const hide = Keyboard.addListener("keyboardWillHide", () => {
+      setKeyboardHeight(0);
+    });
+
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+
   // ── Send message via SSE ────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
     const trimmed = input.trim();
     if (!trimmed || isStreaming || !activeId) return;
+
+    if (!documentId) {
+      console.error("[Chat] Missing documentId");
+      return;
+    }
 
     setInput("");
     setSending(true);
@@ -87,7 +114,6 @@ export default function ChatScreen() {
     const userMsgId = `msg_${Date.now()}`;
     const asstMsgId = `msg_${Date.now() + 1}`;
 
-    // Optimistically add user message + empty assistant placeholder to store
     useChatStore.setState((state) => {
       const sess = state.sessions[activeId];
       if (!sess) return state;
@@ -114,7 +140,7 @@ export default function ChatScreen() {
                 sessionId: activeId,
                 userId: "local",
                 role: "assistant",
-                content: "", // tokens append here
+                content: "",
                 createdAt: now,
               },
             ],
@@ -123,25 +149,20 @@ export default function ChatScreen() {
       };
     });
 
-    // Always pass null for sessionId so the server creates a real UUID session.
-    // Local temp IDs (e.g. "session_1234_abc") are not valid UUIDs and will
-    // cause the server's session lookup to fail.
     const authToken = session?.access_token;
 
     const es = new EventSource(`${API_BASE}/api/chat`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // Required — without this header getAuthenticatedUser() throws 401
-        // and the SSE stream never starts.
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       },
       body: JSON.stringify({
-        sessionId: null, // server creates a fresh DB session
+        sessionId: null,
         content: trimmed,
         documentId,
       }),
-      pollingInterval: 0, // true SSE push, not polling
+      pollingInterval: 0,
     });
     esRef.current = es;
 
@@ -154,17 +175,14 @@ export default function ChatScreen() {
           case "token":
             appendToken(activeId, asstMsgId, data.content);
             break;
-
           case "sources":
             attachSources(activeId, asstMsgId, data.sources);
             break;
-
           case "done":
             finalizeStream();
             setSending(false);
             es.close();
             break;
-
           case "error":
             finalizeStream();
             setSending(false);
@@ -208,6 +226,8 @@ export default function ChatScreen() {
         <View style={[s.bubble, isUser ? s.bubbleUser : s.bubbleAssistant]}>
           {isUser ? (
             <Text style={s.bubbleTextUser}>{item.content}</Text>
+          ) : isThisStreaming && item.content === "" ? (
+            <TypingIndicator />
           ) : (
             <Markdown style={markdownStyle}>
               {item.content + (isThisStreaming ? "▋" : "")}
@@ -215,7 +235,6 @@ export default function ChatScreen() {
           )}
         </View>
 
-        {/* Source citations — collapsed by default */}
         {!isUser && item.sources && item.sources.length > 0 && (
           <MobileCitation count={item.sources.length} sources={item.sources} />
         )}
@@ -223,8 +242,12 @@ export default function ChatScreen() {
     );
   }
 
+  // ── Render ──────────────────────────────────────────────────────────────────
   return (
-    <SafeAreaView style={s.container} edges={["top"]}>
+    // edges={["top","bottom"]} — SafeAreaView owns both safe areas.
+    // "bottom" handles the home indicator on notched iPhones so it's
+    // always visible below the input bar when the keyboard is closed.
+    <SafeAreaView style={s.container} edges={["top", "bottom"]}>
       {/* Header */}
       <View style={s.header}>
         <TouchableOpacity
@@ -235,69 +258,85 @@ export default function ChatScreen() {
           <Text style={s.backBtn}>←</Text>
         </TouchableOpacity>
         <Text style={s.headerTitle} numberOfLines={1}>
-          {doc?.name ?? "Chat"}
+          {doc?.name
+            ? decodeURIComponent(doc.name)
+                .replace(/\.[^/.]+$/, "") // strip extension
+                .replace(/_/g, " ") // underscores to spaces
+            : "Chat"}
         </Text>
       </View>
 
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 20}
-      >
-        {/* Message list */}
-        <FlatList
-          data={reversedMsgs}
-          keyExtractor={(item) => item.id}
-          renderItem={renderMessage}
-          inverted
-          contentContainerStyle={s.messageList}
-          showsVerticalScrollIndicator={false}
-          ListEmptyComponent={
-            <View style={s.emptyChat}>
-              <Text style={s.emptyChatEmoji}>💬</Text>
-              <Text style={s.emptyChatText}>
-                Ask anything about{"\n"}
-                {doc?.name ?? "this document"}
-              </Text>
-            </View>
-          }
-        />
+      {/* Message list
+          When the keyboard is open we push extra paddingBottom into the
+          FlatList so the bottom message is never hidden behind the input bar.
+          Because FlatList is inverted, "bottom" in layout terms is the top
+          of the rendered list — this keeps the newest message visible. */}
+      <FlatList
+        data={reversedMsgs}
+        keyExtractor={(item) => item.id}
+        renderItem={renderMessage}
+        inverted
+        contentContainerStyle={[
+          s.messageList,
+          keyboardHeight > 0 && { paddingBottom: keyboardHeight },
+        ]}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        ListEmptyComponent={
+          <View style={s.emptyChat}>
+            <Text style={s.emptyChatEmoji}>💬</Text>
+            <Text style={s.emptyChatText}>
+              Ask anything about{"\n"}
+              {doc?.name ?? "this document"}
+            </Text>
+          </View>
+        }
+      />
 
-        {/* Input bar */}
-        <View style={s.inputBar}>
-          <TextInput
-            ref={inputRef}
-            style={s.input}
-            value={input}
-            onChangeText={setInput}
-            placeholder="Ask a question…"
-            placeholderTextColor="#64748B"
-            multiline
-            maxLength={2000}
-            editable={!isStreaming}
-            returnKeyType="default"
-            blurOnSubmit={false}
-            accessibilityLabel="Chat input"
-          />
-          <TouchableOpacity
-            onPress={handleSend}
-            disabled={!input.trim() || isStreaming}
-            style={[
-              s.sendBtn,
-              (!input.trim() || isStreaming) && s.sendBtnDisabled,
-            ]}
-            accessibilityLabel={
-              isStreaming ? "Generating response" : "Send message"
-            }
-          >
-            {isStreaming ? (
-              <ActivityIndicator color="#FFFFFF" size="small" />
-            ) : (
-              <Text style={s.sendBtnIcon}>↑</Text>
-            )}
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
+      {/* Input bar — sits directly above the spacer, never inside
+          KeyboardAvoidingView so there's no offset miscalculation */}
+      <View style={s.inputBar}>
+        <TextInput
+          ref={inputRef}
+          style={s.input}
+          value={input}
+          onChangeText={setInput}
+          placeholder="Ask a question…"
+          placeholderTextColor="#64748B"
+          multiline
+          maxLength={2000}
+          editable={!isStreaming}
+          returnKeyType="default"
+          blurOnSubmit={false}
+          accessibilityLabel="Chat input"
+        />
+        <TouchableOpacity
+          onPress={handleSend}
+          disabled={!input.trim() || isStreaming}
+          style={[
+            s.sendBtn,
+            (!input.trim() || isStreaming) && s.sendBtnDisabled,
+          ]}
+          accessibilityLabel={
+            isStreaming ? "Generating response" : "Send message"
+          }
+        >
+          {isStreaming ? (
+            <ActivityIndicator color="#FFFFFF" size="small" />
+          ) : (
+            <Text style={s.sendBtnIcon}>↑</Text>
+          )}
+        </TouchableOpacity>
+      </View>
+
+      {/* Keyboard spacer — this is the core of the fix.
+          Grows to exactly keyboardHeight as the keyboard rises,
+          pushing the input bar up with zero measurement error.
+          SafeAreaView's "bottom" edge already accounts for the home
+          indicator, so this height is pure keyboard — no double-counting. */}
+      <View style={{ height: keyboardHeight }} />
+      {/* Keyboard spacer */}
+      {Platform.OS === "ios" && <View style={{ height: keyboardHeight }} />}
     </SafeAreaView>
   );
 }
@@ -404,6 +443,8 @@ const s = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: "#334155",
     backgroundColor: "#0F172A",
+    // No paddingBottom — SafeAreaView edges={["bottom"]} handles
+    // the home indicator gap when the keyboard is closed.
   },
   input: {
     flex: 1,

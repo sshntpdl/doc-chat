@@ -141,10 +141,11 @@ export async function POST(request: NextRequest) {
     }
 
     // ── Determine document type ───────────────────────────────────────────
+    const fileName = decodeURIComponent(file.name);
     const docType =
       mimeType === "application/pdf"
         ? "pdf"
-        : file.name.endsWith(".md") || mimeType.includes("markdown")
+        : fileName.endsWith(".md") || mimeType.includes("markdown")
           ? "markdown"
           : "text";
 
@@ -153,7 +154,7 @@ export async function POST(request: NextRequest) {
       .from("documents")
       .insert({
         user_id: user.id,
-        name: file.name,
+        name: fileName,
         size: file.size,
         type: docType,
         status: "processing",
