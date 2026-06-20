@@ -1,4 +1,11 @@
 // FILE: /packages/stores/src/authStore.ts
+//
+// KEY CHANGE in signInWithEmail:
+// After a successful signInWithPassword, we POST the tokens to
+// /api/auth/set-session. That server route uses @supabase/ssr's server
+// client to write the session cookies in the correct chunked format.
+// Only after that succeeds do we update the store and let the login
+// page navigate. This guarantees middleware sees a valid session.
 
 import { create } from "zustand";
 import { devtools } from "zustand/middleware";
@@ -32,27 +39,6 @@ interface AuthActions {
   ): Promise<AppError | null>;
   signOut(client?: SupabaseClient): Promise<void>;
   setSession(session: Session | null): void;
-  /**
-   * Returns a guaranteed-fresh access token, or null if there's no valid
-   * session (refresh token missing/expired too — caller should treat this
-   * as "signed out" and route to login).
-   *
-   * WHY THIS EXISTS:
-   * Don't read `session.access_token` directly off the store for outgoing
-   * requests (chat, upload, etc). That value is only as fresh as the last
-   * onAuthStateChange event, which depends on the background auto-refresh
-   * timer — and on React Native that timer pauses/throttles while the app
-   * is backgrounded. A user who leaves the app idle past the token's TTL
-   * and then sends a message will silently fire a request with an expired
-   * token, which the server correctly rejects with 401, surfacing as a
-   * confusing "nothing happens" failure.
-   *
-   * supabase.auth.getSession() does an inline expiry check on every call:
-   * if the access token is expired or near expiry, it transparently uses
-   * the refresh token to mint a new one before returning — independent of
-   * whether the background timer ever fired. Calling this immediately
-   * before building a request header closes that gap.
-   */
   getAccessToken(client?: SupabaseClient): Promise<string | null>;
 }
 
@@ -77,18 +63,29 @@ export const useAuthStore = create<AuthStore>()(
       async initialize(client) {
         try {
           const supabase = client ?? createBrowserClient();
+
+          // Attach listener FIRST so we don't miss events during async getSession
+          supabase.auth.onAuthStateChange((event, session) => {
+            get().setSession(session);
+            if (event === "INITIAL_SESSION") {
+              set((s) => {
+                s.isInitialized = true;
+              });
+            }
+          });
+
+          // INITIAL_SESSION fires synchronously above with the current session.
+          // We still call getSession() so isInitialized is set even if the
+          // onAuthStateChange listener fires before the set() call processes.
           const {
             data: { session },
           } = await supabase.auth.getSession();
-
           set((s) => {
-            s.session = session;
-            s.user = session?.user ?? null;
-            s.isInitialized = true;
-          });
-
-          supabase.auth.onAuthStateChange((_event, session) => {
-            get().setSession(session);
+            if (!s.isInitialized) {
+              s.session = session;
+              s.user = session?.user ?? null;
+              s.isInitialized = true;
+            }
           });
         } catch {
           set((s) => {
@@ -111,23 +108,17 @@ export const useAuthStore = create<AuthStore>()(
             data: { session },
             error,
           } = await supabase.auth.getSession();
-
           if (error || !session) {
-            // Refresh token is gone or invalid too — genuinely signed out.
             set((s) => {
               s.session = null;
               s.user = null;
             });
             return null;
           }
-
-          // getSession() may have silently refreshed — keep the store
-          // (and therefore every other screen reading `session`) in sync.
           set((s) => {
             s.session = session;
             s.user = session.user;
           });
-
           return session.access_token;
         } catch {
           return null;
@@ -140,17 +131,66 @@ export const useAuthStore = create<AuthStore>()(
         });
         try {
           const supabase = client ?? createBrowserClient();
-          const { error } = await supabase.auth.signInWithPassword({
+
+          // Step 1: authenticate with Supabase — get tokens in response body
+          const { data, error } = await supabase.auth.signInWithPassword({
             email,
             password,
           });
-          if (error)
+
+          if (error) {
             return new AppError(
               ErrorCode.UNAUTHORIZED,
               error.message,
               401,
               false,
             );
+          }
+
+          if (!data.session) {
+            return new AppError(
+              ErrorCode.UNAUTHORIZED,
+              "No session returned",
+              401,
+              false,
+            );
+          }
+
+          // Step 2: POST tokens to our server route so @supabase/ssr writes
+          // the cookies in its own chunked format. The browser client (with
+          // persistSession: false) does NOT write cookies itself — only the
+          // server route does. This eliminates the format mismatch.
+          const res = await fetch("/api/auth/set-session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              access_token: data.session.access_token,
+              refresh_token: data.session.refresh_token,
+              expires_at: data.session.expires_at,
+              expires_in: data.session.expires_in,
+              user: data.user,
+            }),
+          });
+
+          if (!res.ok) {
+            const body = (await res.json().catch(() => ({}))) as {
+              error?: string;
+            };
+            return new AppError(
+              ErrorCode.UNAUTHORIZED,
+              body.error ?? "Failed to establish session",
+              401,
+              false,
+            );
+          }
+
+          // Step 3: update the store directly (no onAuthStateChange needed —
+          // the session is now in cookies AND in the store)
+          set((s) => {
+            s.session = data.session;
+            s.user = data.session!.user;
+          });
+
           return null;
         } finally {
           set((s) => {
@@ -220,6 +260,10 @@ export const useAuthStore = create<AuthStore>()(
         try {
           const supabase = client ?? createBrowserClient();
           await supabase.auth.signOut();
+          // Also clear server-side cookies
+          await fetch("/api/auth/set-session", { method: "DELETE" }).catch(
+            () => {},
+          );
         } finally {
           clearAllStores();
           set((s) => {

@@ -2,29 +2,56 @@
 "use client";
 // Full auth page: sign in + sign up in one component, animated slide transition.
 // Magic link flow: submit email → "Check your inbox" state with 30s resend countdown.
+//
+// FIX: Removed imperative router.push() after signInWithEmail. Instead, a useEffect
+// watches the store's `user` field — which is set by onAuthStateChange AFTER the SDK
+// has written the session cookies — and only then navigates. This ensures the
+// middleware finds valid cookies on the next request and doesn't redirect back to login.
 
 import { useState, useEffect, useTransition } from "react";
-import { useRouter, useSearchParams }          from "next/navigation";
-import { useAuthStore }                        from "@docchat/stores";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useAuthStore } from "@docchat/stores";
 
 type Mode = "signin" | "signup" | "magic" | "magic-sent";
 
 export default function LoginPage() {
-  const router        = useRouter();
-  const searchParams  = useSearchParams();
-  const redirectTo    = searchParams.get("redirectTo") ?? "/dashboard";
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const redirectTo = searchParams.get("redirectTo") ?? "/dashboard";
 
   const { signInWithEmail, signUpWithEmail, signInWithMagicLink, isLoading } =
     useAuthStore();
 
-  const [mode,         setMode]         = useState<Mode>("signin");
-  const [email,        setEmail]        = useState("");
-  const [password,     setPassword]     = useState("");
+  // ── NEW: watch user + isInitialized from the store ────────────────────
+  // When onAuthStateChange fires after a successful login, it updates
+  // the store's `user`. We react to that here and navigate — this
+  // guarantees we only redirect AFTER the session cookies are written.
+  const user = useAuthStore((s) => s.user);
+  const isInitialized = useAuthStore((s) => s.isInitialized);
+
+  const [mode, setMode] = useState<Mode>("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [error,        setError]        = useState<string | null>(null);
-  const [fieldErrors,  setFieldErrors]  = useState<{ email?: string; password?: string }>({});
-  const [countdown,    setCountdown]    = useState(0);
-  const [isPending,    startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<{
+    email?: string;
+    password?: string;
+  }>({});
+  const [countdown, setCountdown] = useState(0);
+  const [isPending, startTransition] = useTransition();
+
+  // ── Navigate once session cookies are confirmed written ────────────────
+  // The store's `user` is null until onAuthStateChange fires with
+  // event === "SIGNED_IN", which only happens after @supabase/ssr has
+  // persisted the tokens to cookies. Watching here avoids the race where
+  // router.push() fires before cookies are written and the middleware
+  // incorrectly sees an unauthenticated request.
+  useEffect(() => {
+    if (isInitialized && user) {
+      router.replace(redirectTo);
+    }
+  }, [user, isInitialized, redirectTo, router]);
 
   // Resend countdown timer
   useEffect(() => {
@@ -51,26 +78,28 @@ export default function LoginPage() {
     e.preventDefault();
     setError(null);
 
-    const emailErr    = validateEmail(email);
-    const passwordErr = mode !== "magic" ? validatePassword(password) : undefined;
+    const emailErr = validateEmail(email);
+    const passwordErr =
+      mode !== "magic" ? validatePassword(password) : undefined;
     if (emailErr || passwordErr) {
       setFieldErrors({ email: emailErr, password: passwordErr });
       return;
     }
 
-    startTransition(async () => {
-      const err =
-        mode === "signup"
-          ? await signUpWithEmail(email, password)
-          : await signInWithEmail(email, password);
+    // Fixed: Keep startTransition wrapper synchronous for React 18 compatibility
+    startTransition(() => {
+      (async () => {
+        const err =
+          mode === "signup"
+            ? await signUpWithEmail(email, password)
+            : await signInWithEmail(email, password);
 
-      if (err) {
-        setError(err.message);
-      } else if (mode === "signup") {
-        setMode("magic-sent"); // show "check your email" for verification
-      } else {
-        router.push(redirectTo);
-      }
+        if (err) {
+          setError(err.message);
+        } else if (mode === "signup") {
+          setMode("magic-sent"); // show "check your email" for verification
+        }
+      })();
     });
   }
 
@@ -78,16 +107,22 @@ export default function LoginPage() {
     e.preventDefault();
     setError(null);
     const emailErr = validateEmail(email);
-    if (emailErr) { setFieldErrors({ email: emailErr }); return; }
+    if (emailErr) {
+      setFieldErrors({ email: emailErr });
+      return;
+    }
 
-    startTransition(async () => {
-      const err = await signInWithMagicLink(email);
-      if (err) {
-        setError(err.message);
-      } else {
-        setMode("magic-sent");
-        setCountdown(30);
-      }
+    // Fixed: Keep startTransition wrapper synchronous for React 18 compatibility
+    startTransition(() => {
+      (async () => {
+        const err = await signInWithMagicLink(email);
+        if (err) {
+          setError(err.message);
+        } else {
+          setMode("magic-sent");
+          setCountdown(30);
+        }
+      })();
     });
   }
 
@@ -99,14 +134,22 @@ export default function LoginPage() {
       <div className="min-h-screen flex items-center justify-center bg-[var(--color-background)] p-4">
         <div className="w-full max-w-md text-center space-y-6">
           {/* Animated envelope icon */}
-          <div className="text-7xl animate-bounce select-none" aria-hidden="true">✉️</div>
+          <div
+            className="text-7xl animate-bounce select-none"
+            aria-hidden="true"
+          >
+            ✉️
+          </div>
           <div>
             <h1 className="text-2xl font-semibold text-[var(--color-foreground)]">
               Check your inbox
             </h1>
             <p className="mt-2 text-[var(--color-muted)]">
-              We sent a link to <strong className="text-[var(--color-foreground)]">{email}</strong>.
-              Click it to sign in.
+              We sent a link to{" "}
+              <strong className="text-[var(--color-foreground)]">
+                {email}
+              </strong>
+              . Click it to sign in.
             </p>
           </div>
           <button
@@ -149,10 +192,15 @@ export default function LoginPage() {
           {[
             { icon: "📄", text: "Upload PDFs and Markdown files" },
             { icon: "🔍", text: "AI finds answers in your documents" },
-            { icon: "📌", text: "Cited sources — know where each answer comes from" },
+            {
+              icon: "📌",
+              text: "Cited sources — know where each answer comes from",
+            },
           ].map(({ icon, text }) => (
             <div key={text} className="flex items-start gap-3">
-              <span className="text-xl" aria-hidden="true">{icon}</span>
+              <span className="text-xl" aria-hidden="true">
+                {icon}
+              </span>
               <p className="text-white/90">{text}</p>
             </div>
           ))}
@@ -164,7 +212,9 @@ export default function LoginPage() {
       <div className="flex-1 flex items-center justify-center p-6 bg-[var(--color-background)]">
         <div className="w-full max-w-sm space-y-6">
           {/* Mobile logo */}
-          <div className="lg:hidden text-xl font-bold text-[var(--color-primary)]">DocChat</div>
+          <div className="lg:hidden text-xl font-bold text-[var(--color-primary)]">
+            DocChat
+          </div>
 
           {/* Mode heading */}
           <div>
@@ -176,7 +226,11 @@ export default function LoginPage() {
                 ? "Already have an account?"
                 : "Don't have an account?"}{" "}
               <button
-                onClick={() => { setMode(mode === "signup" ? "signin" : "signup"); setError(null); setFieldErrors({}); }}
+                onClick={() => {
+                  setMode(mode === "signup" ? "signin" : "signup");
+                  setError(null);
+                  setFieldErrors({});
+                }}
                 className="text-[var(--color-primary)] hover:underline font-medium"
               >
                 {mode === "signup" ? "Sign in" : "Sign up"}
@@ -186,8 +240,11 @@ export default function LoginPage() {
 
           {/* Global error */}
           {error && (
-            <div role="alert" className="p-3 rounded-[var(--radius-md)] bg-[var(--color-destructive-subtle)]
-                                         text-[var(--color-destructive)] text-sm">
+            <div
+              role="alert"
+              className="p-3 rounded-[var(--radius-md)] bg-[var(--color-destructive-subtle)]
+                                         text-[var(--color-destructive)] text-sm"
+            >
               {error}
             </div>
           )}
@@ -197,11 +254,15 @@ export default function LoginPage() {
             {(["signin", "magic"] as const).map((m) => (
               <button
                 key={m}
-                onClick={() => { setMode(mode === "signup" && m === "signin" ? "signup" : m); setError(null); }}
+                onClick={() => {
+                  setMode(mode === "signup" && m === "signin" ? "signup" : m);
+                  setError(null);
+                }}
                 className={`flex-1 py-2 text-sm rounded-[var(--radius-md)] border transition-colors
-                  ${(mode === m || (mode === "signup" && m === "signin"))
-                    ? "border-[var(--color-primary)] bg-[var(--color-primary-subtle)] text-[var(--color-primary)]"
-                    : "border-[var(--color-border)] text-[var(--color-muted)] hover:bg-[var(--color-surface)]"
+                  ${
+                    mode === m || (mode === "signup" && m === "signin")
+                      ? "border-[var(--color-primary)] bg-[var(--color-primary-subtle)] text-[var(--color-primary)]"
+                      : "border-[var(--color-border)] text-[var(--color-muted)] hover:bg-[var(--color-surface)]"
                   }`}
               >
                 {m === "signin" ? "Password" : "Magic Link"}
@@ -217,7 +278,10 @@ export default function LoginPage() {
           >
             {/* Email */}
             <div className="space-y-1">
-              <label htmlFor="email" className="text-sm font-medium text-[var(--color-foreground)]">
+              <label
+                htmlFor="email"
+                className="text-sm font-medium text-[var(--color-foreground)]"
+              >
                 Email
               </label>
               <input
@@ -226,7 +290,9 @@ export default function LoginPage() {
                 autoComplete="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                onBlur={() => setFieldErrors((f) => ({ ...f, email: validateEmail(email) }))}
+                onBlur={() =>
+                  setFieldErrors((f) => ({ ...f, email: validateEmail(email) }))
+                }
                 aria-describedby={fieldErrors.email ? "email-error" : undefined}
                 aria-invalid={!!fieldErrors.email}
                 className={`w-full px-3 py-2.5 rounded-[var(--radius-md)] border bg-[var(--color-surface)]
@@ -236,7 +302,11 @@ export default function LoginPage() {
                 placeholder="you@example.com"
               />
               {fieldErrors.email && (
-                <p id="email-error" className="text-xs text-[var(--color-destructive)]" role="alert">
+                <p
+                  id="email-error"
+                  className="text-xs text-[var(--color-destructive)]"
+                  role="alert"
+                >
                   {fieldErrors.email}
                 </p>
               )}
@@ -245,18 +315,30 @@ export default function LoginPage() {
             {/* Password (hidden for magic link) */}
             {mode !== "magic" && (
               <div className="space-y-1">
-                <label htmlFor="password" className="text-sm font-medium text-[var(--color-foreground)]">
+                <label
+                  htmlFor="password"
+                  className="text-sm font-medium text-[var(--color-foreground)]"
+                >
                   Password
                 </label>
                 <div className="relative">
                   <input
                     id="password"
                     type={showPassword ? "text" : "password"}
-                    autoComplete={mode === "signup" ? "new-password" : "current-password"}
+                    autoComplete={
+                      mode === "signup" ? "new-password" : "current-password"
+                    }
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    onBlur={() => setFieldErrors((f) => ({ ...f, password: validatePassword(password) }))}
-                    aria-describedby={fieldErrors.password ? "password-error" : undefined}
+                    onBlur={() =>
+                      setFieldErrors((f) => ({
+                        ...f,
+                        password: validatePassword(password),
+                      }))
+                    }
+                    aria-describedby={
+                      fieldErrors.password ? "password-error" : undefined
+                    }
                     aria-invalid={!!fieldErrors.password}
                     className={`w-full px-3 py-2.5 pr-10 rounded-[var(--radius-md)] border
                                 bg-[var(--color-surface)] text-[var(--color-foreground)]
@@ -268,7 +350,9 @@ export default function LoginPage() {
                   <button
                     type="button"
                     onClick={() => setShowPassword((v) => !v)}
-                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    aria-label={
+                      showPassword ? "Hide password" : "Show password"
+                    }
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-muted)]
                                hover:text-[var(--color-foreground)] transition-colors text-sm"
                   >
@@ -276,7 +360,11 @@ export default function LoginPage() {
                   </button>
                 </div>
                 {fieldErrors.password && (
-                  <p id="password-error" className="text-xs text-[var(--color-destructive)]" role="alert">
+                  <p
+                    id="password-error"
+                    className="text-xs text-[var(--color-destructive)]"
+                    role="alert"
+                  >
                     {fieldErrors.password}
                   </p>
                 )}
@@ -294,13 +382,16 @@ export default function LoginPage() {
                          transition-all flex items-center justify-center gap-2"
             >
               {busy && (
-                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" aria-hidden="true" />
+                <span
+                  className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"
+                  aria-hidden="true"
+                />
               )}
               {mode === "magic"
                 ? "Send magic link"
                 : mode === "signup"
-                ? "Create account"
-                : "Sign in"}
+                  ? "Create account"
+                  : "Sign in"}
             </button>
           </form>
         </div>

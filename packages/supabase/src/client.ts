@@ -1,57 +1,34 @@
-// FILE: /packages/supabase/src/client.ts
-
 import { createBrowserClient as _createBrowserClient } from "@supabase/ssr";
 import { createServerClient as _createServerClient } from "@supabase/ssr";
-import type { CookieOptions } from "@supabase/ssr";
 
 function getEnv() {
   const url =
     process.env.EXPO_PUBLIC_SUPABASE_URL ??
     process.env.NEXT_PUBLIC_SUPABASE_URL;
-
   const key =
     process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ??
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!url || !key) {
+  if (!url || !key)
     throw new Error("[Supabase] Missing SUPABASE_URL or SUPABASE_ANON_KEY");
-  }
   return { url, key };
 }
 
-// Optional storage interface — matches AsyncStorage shape on mobile
-export interface SupabaseStorage {
-  getItem(key: string): Promise<string | null>;
-  setItem(key: string, value: string): Promise<void>;
-  removeItem(key: string): Promise<void>;
-}
-
-// Pass `storage` on mobile (AsyncStorage), leave undefined on web (uses cookies)
-export function createBrowserClient(storage?: SupabaseStorage) {
+export function createBrowserClient() {
   const { url, key } = getEnv();
-
-  if (storage) {
-    // Mobile path: use @supabase/supabase-js directly with AsyncStorage
-    // Import dynamically to avoid pulling supabase-js into web bundle path
-    const { createClient } = require("@supabase/supabase-js");
-    return createClient(url, key, {
-      auth: {
-        storage,
-        autoRefreshToken: true,
-        persistSession: true,
-        detectSessionInUrl: false, // no URL hash on mobile
-      },
-    });
-  }
-
-  // Web path: @supabase/ssr handles cookie storage automatically
-  return _createBrowserClient(url, key);
+  return _createBrowserClient(url, key, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
 }
 
+// ✅ v0.3.0: cookieStore must expose get(name), set(name,value,options), delete(name)
 export function createServerClient(cookieStore: {
   get(name: string): { name: string; value: string } | undefined;
-  set(name: string, value: string, options: CookieOptions): void;
-  delete(name: string): void;
+  set(name: string, value: string, options: object): void;
+  delete(name: string, options?: object): void;
 }) {
   const { url, key } = getEnv();
 
@@ -60,14 +37,14 @@ export function createServerClient(cookieStore: {
       get(name: string) {
         return cookieStore.get(name)?.value;
       },
-      set(name: string, value: string, options: CookieOptions) {
+      set(name: string, value: string, options: object) {
         try {
           cookieStore.set(name, value, options);
         } catch {}
       },
-      remove(name: string, options: CookieOptions) {
+      remove(name: string, options: object) {
         try {
-          cookieStore.set(name, "", { ...options, maxAge: 0 });
+          cookieStore.delete(name, options);
         } catch {}
       },
     },
