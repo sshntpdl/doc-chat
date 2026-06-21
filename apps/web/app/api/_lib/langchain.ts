@@ -23,7 +23,7 @@ import {
 import type { BaseMessage } from "@langchain/core/messages";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { AppError, ErrorCode } from "@docchat/types";
-import type { ChatMessage, SourceCitation } from "@docchat/types";
+import type { SourceCitation } from "@docchat/types";
 
 // ─── SINGLETON: ChatGroq ──────────────────────────────────────────────────────
 
@@ -34,7 +34,7 @@ export function getGroqClient(): ChatGroq {
     if (!process.env.GROQ_API_KEY) {
       throw new AppError(
         ErrorCode.GROQ_UNAVAILABLE,
-        "GROQ_API_KEY not set",
+        "GROQ_API_KEY is not set in environment variables",
         500,
         false,
       );
@@ -59,7 +59,7 @@ export function getEmbeddingsClient(): HuggingFaceInferenceEmbeddings {
     if (!process.env.HUGGINGFACE_API_KEY) {
       throw new AppError(
         ErrorCode.EMBEDDING_FAILED,
-        "HUGGINGFACE_API_KEY not set",
+        "HUGGINGFACE_API_KEY is not set in environment variables",
         500,
         false,
       );
@@ -88,12 +88,30 @@ export async function embedQuery(text: string): Promise<number[]> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const [embedding] = await client.embedDocuments([text]);
+
+      // Sanity-check: HuggingFace occasionally returns an empty array on
+      // the free tier when the model is loading even without throwing.
+      if (!embedding || embedding.length === 0) {
+        throw new Error(
+          "HuggingFace returned an empty embedding vector — model may still be loading",
+        );
+      }
+
       return embedding;
     } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
       const isModelLoading =
-        err instanceof Error && err.message.includes("loading");
+        errMsg.toLowerCase().includes("loading") ||
+        errMsg.toLowerCase().includes("503") ||
+        errMsg.toLowerCase().includes("currently loading");
+
+      console.warn(
+        `[embedQuery] attempt ${attempt + 1}/${maxRetries + 1} failed:`,
+        errMsg,
+      );
 
       if (isModelLoading && attempt < maxRetries) {
+        console.log(`[embedQuery] Model loading — waiting 3s before retry...`);
         // Wait 3s for HuggingFace to warm up the model
         await new Promise((r) => setTimeout(r, 3000));
         continue;
@@ -101,7 +119,7 @@ export async function embedQuery(text: string): Promise<number[]> {
 
       throw new AppError(
         ErrorCode.EMBEDDING_FAILED,
-        `Embedding failed: ${err instanceof Error ? err.message : "unknown"}`,
+        `Embedding failed (attempt ${attempt + 1}): ${errMsg}`,
         500,
         attempt < maxRetries, // retryable if we haven't exhausted attempts
       );
@@ -110,7 +128,7 @@ export async function embedQuery(text: string): Promise<number[]> {
 
   throw new AppError(
     ErrorCode.EMBEDDING_FAILED,
-    "Embedding failed after retries",
+    "Embedding failed after all retries — HuggingFace model may be unavailable",
     500,
     true,
   );
@@ -171,6 +189,16 @@ export async function retrieveChunks(
   documentId: string | null = null,
   k = 4,
 ): Promise<RetrievedChunk[]> {
+  // FIX: validate embedding before sending to avoid a confusing pgvector error
+  if (!queryEmbedding || queryEmbedding.length === 0) {
+    throw new AppError(
+      ErrorCode.EMBEDDING_FAILED,
+      "Cannot perform vector search: embedding is empty",
+      500,
+      false,
+    );
+  }
+
   const { data, error } = await supabase.rpc("match_chunks", {
     query_embedding: queryEmbedding,
     match_user_id: userId,
@@ -179,9 +207,10 @@ export async function retrieveChunks(
   });
 
   if (error) {
+    // Surface the Supabase/pgvector error message directly
     throw new AppError(
       ErrorCode.EMBEDDING_FAILED,
-      `Vector search failed: ${error.message}`,
+      `Vector search failed: ${error.message} (code: ${error.code})`,
       500,
       true,
     );
@@ -193,20 +222,43 @@ export async function retrieveChunks(
 // ─── buildChatHistory ─────────────────────────────────────────────────────────
 
 /**
- * Convert DB chat messages to LangChain BaseMessage array.
- * The system message is injected separately in the chat Route Handler.
- * We only pass the last 10 message pairs (20 messages) to keep the
- * context window manageable — older history is truncated.
+ * Convert DB chat messages (or plain {role, content} rows) to LangChain
+ * BaseMessage instances.
+ *
+ * WHY THE SIGNATURE ACCEPTS A BROADER TYPE:
+ * The route handler fetches messages directly from Supabase as
+ * Array<{role: string, content: string}> — plain objects, not full ChatMessage
+ * entities. Passing them to this function with `as any` was suppressing a
+ * type error but letting malformed data through. We now accept the raw DB
+ * shape explicitly so the cast is unnecessary and the mapping is safe.
+ *
+ * IMPORTANT — do NOT pass the pre-allocated empty assistant message that was
+ * just inserted into the DB (content: "") into history. The route handler
+ * already excludes it because it fetches history BEFORE inserting the new
+ * messages, so this is safe as-is.
+ *
+ * We only pass the last 20 messages (10 turns) to keep the context window
+ * manageable — older history is truncated.
  */
-export function buildChatHistory(messages: ChatMessage[]): BaseMessage[] {
+export function buildChatHistory(
+  messages: Array<{ role: string; content: string }>,
+): BaseMessage[] {
   // Take last 20 messages (10 turns) for context window efficiency
   const recent = messages.slice(-20);
 
-  return recent.map((msg) =>
-    msg.role === "user"
-      ? new HumanMessage(msg.content)
-      : new AIMessage(msg.content),
-  );
+  return recent
+    .filter((msg) => {
+      // Skip empty assistant placeholders that sneak in from pre-allocation
+      if (msg.role === "assistant" && !msg.content?.trim()) return false;
+      // Skip anything with an unrecognised role to avoid LangChain choking
+      if (msg.role !== "user" && msg.role !== "assistant") return false;
+      return true;
+    })
+    .map((msg) =>
+      msg.role === "user"
+        ? new HumanMessage(msg.content)
+        : new AIMessage(msg.content),
+    );
 }
 
 // ─── fetchDocumentNameMap ─────────────────────────────────────────────────────
@@ -227,11 +279,22 @@ export async function fetchDocumentNameMap(
 ): Promise<Record<string, string>> {
   if (chunks.length === 0) return {};
 
-  const docIds = [...new Set(chunks.map((c) => c.documentId))];
-  const { data: docs } = await supabase
+  const docIds = [...new Set(chunks.map((c) => c.documentId))].filter(Boolean);
+
+  if (docIds.length === 0) return {};
+
+  const { data: docs, error } = await supabase
     .from("documents")
     .select("id, name")
     .in("id", docIds);
+
+  if (error) {
+    console.warn(
+      "[fetchDocumentNameMap] Failed to fetch document names:",
+      error.message,
+    );
+    return {};
+  }
 
   return Object.fromEntries(
     (docs ?? []).map((d: { id: string; name: string }) => [d.id, d.name]),

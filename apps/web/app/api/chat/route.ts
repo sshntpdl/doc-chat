@@ -8,30 +8,16 @@
 //   3. Load or create chat session in DB
 //   4. Embed the user's question (HuggingFace)
 //   5. Retrieve top-K chunks (Supabase pgvector)
-//   6. Resolve document names once (FIX #11 — shared by prompt + citations)
-//   7. Build LangChain prompt (system + history + context + question)
+//   6. Resolve document names once (shared by prompt + citations)
+//   7. Build message array manually (NO ChatPromptTemplate — see Step 3)
 //   8. Stream Groq response token-by-token as SSE events
 //   9. After stream ends, emit 'sources' event with citations
 //   10. Persist the completed message to DB
-//
-// TYPE FIX (see bottom note): the previous version derived the Supabase
-// client type as `Awaited<ReturnType<typeof import("@supabase/supabase-js").createClient>>`.
-// Because createClient is generic and no Database schema was passed,
-// that resolved to a client typed against the default `any` Database
-// generic, which causes postgrest-js's Update<> helper to collapse to
-// `never` — hence ".update({...}) — Argument of type '{...}' is not
-// assignable to parameter of type 'never'." We now type the client
-// explicitly as SupabaseClient<Database> (or a safe fallback — see
-// note at the bottom of this file) instead of re-deriving it from the
-// bare import.
 
 import { NextRequest } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { ChatGroq } from "@langchain/groq";
-import {
-  ChatPromptTemplate,
-  MessagesPlaceholder,
-} from "@langchain/core/prompts";
+import { SystemMessage, HumanMessage } from "@langchain/core/messages";
+import type { BaseMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import { getAuthenticatedUser } from "../_lib/auth";
 import { streamResponse, errorResponse } from "../_lib/response";
@@ -48,19 +34,12 @@ import {
 import { AppError, ErrorCode } from "@docchat/types";
 import type { SSEEvent } from "@docchat/types";
 
-// If you've generated real Supabase types (recommended — run:
-//   supabase gen types typescript --project-id <id> > packages/types/src/database.types.ts
-// and export `Database` from `@docchat/types`), swap this for:
-//   import type { Database } from "@docchat/types";
-// and replace every `SupabaseClientAny` below with `SupabaseClient<Database>`.
-// Until then, this alias keeps real type-checking on .insert()/.update()
-// payload shapes without the bare-import generic collapsing to `never`.
 type SupabaseClientAny = SupabaseClient<any, "public", any>;
 
 // ─── VALIDATION SCHEMA ────────────────────────────────────────────────────────
 
 const ChatRequestSchema = z.object({
-  sessionId: z.string().uuid().optional().nullable(), // was z.string().optional()
+  sessionId: z.string().uuid().optional().nullable(),
   content: z
     .string({
       required_error: "content is required",
@@ -77,13 +56,10 @@ const ChatRequestSchema = z.object({
 
 export async function POST(request: NextRequest) {
   try {
-    // ── Auth ─────────────────────────────────────────────────────────────
     const { user, supabase } = await getAuthenticatedUser(request);
 
-    // ── Rate limit: 30 requests/minute per user ────────────────────────
     rateLimiter(user.id, "chat", 30, 60 * 1000);
 
-    // ── Parse body ────────────────────────────────────────────────────
     const body = await request.json();
     const parsed = ChatRequestSchema.safeParse(body);
 
@@ -98,23 +74,20 @@ export async function POST(request: NextRequest) {
 
     const { content, documentId, sessionId: incomingSessionId } = parsed.data;
 
-    // ── Load or create session ─────────────────────────────────────────
     let sessionId = incomingSessionId;
     let existingMessages: Array<{ role: string; content: string }> = [];
 
     if (sessionId) {
-      // Load existing session history for context
       const { data: msgs } = await supabase
         .from("chat_messages")
         .select("role, content")
         .eq("session_id", sessionId)
-        .eq("user_id", user.id) // RLS defense in depth
+        .eq("user_id", user.id)
         .order("created_at", { ascending: true })
-        .limit(20); // last 10 turns
+        .limit(20);
 
       existingMessages = msgs ?? [];
     } else {
-      // Create new session
       const title = content.slice(0, 40) + (content.length > 40 ? "…" : "");
       const { data: session, error } = await supabase
         .from("chat_sessions")
@@ -137,26 +110,20 @@ export async function POST(request: NextRequest) {
       sessionId = session.id;
     }
 
-    // Persist the user message before streaming (so it's saved even if stream fails)
-    const { data: userMsg } = await supabase
-      .from("chat_messages")
-      .insert({
-        session_id: sessionId,
-        user_id: user.id,
-        role: "user",
-        content,
-      })
-      .select("id")
-      .single();
+    await supabase.from("chat_messages").insert({
+      session_id: sessionId,
+      user_id: user.id,
+      role: "user",
+      content,
+    });
 
-    // Pre-allocate assistant message row — update content after streaming
     const { data: assistantMsg } = await supabase
       .from("chat_messages")
       .insert({
         session_id: sessionId,
         user_id: user.id,
         role: "assistant",
-        content: "", // filled in after streaming
+        content: "",
       })
       .select("id")
       .single();
@@ -168,7 +135,6 @@ export async function POST(request: NextRequest) {
       sessionId: sessionId!,
     };
 
-    // ── Start SSE response with async generator ────────────────────────
     return streamResponse(
       generateStream({
         user,
@@ -187,8 +153,6 @@ export async function POST(request: NextRequest) {
 }
 
 // ─── STREAM GENERATOR ─────────────────────────────────────────────────────────
-// Separated from the handler so we can yield SSE events without coupling to
-// the HTTP layer. The streamResponse() wrapper handles SSE serialization.
 
 async function* generateStream({
   user,
@@ -209,72 +173,145 @@ async function* generateStream({
   assistantMsgId: string;
   startEvent: SSEEvent;
 }): AsyncGenerator<SSEEvent> {
-  // Emit start event immediately so the client shows the typing indicator
   yield startEvent;
 
-  // ── Step 1: Embed the question ───────────────────────────────────────
-  const queryEmbedding = await embedQuery(content);
+  // ── Step 1: Embed ────────────────────────────────────────────────────
+  let queryEmbedding: number[];
+  try {
+    queryEmbedding = await embedQuery(content);
+  } catch (err) {
+    console.error("[generateStream] embedQuery failed:", err);
+    throw new AppError(
+      ErrorCode.EMBEDDING_FAILED,
+      `Embedding step failed: ${err instanceof Error ? err.message : String(err)}`,
+      500,
+      true,
+    );
+  }
 
-  // ── Step 2: Retrieve relevant chunks ────────────────────────────────
-  const chunks = await retrieveChunks(
-    queryEmbedding,
-    supabase as any,
-    user.id,
-    documentId,
-    4, // top-K
-  );
+  // ── Step 2: Retrieve chunks ──────────────────────────────────────────
+  let chunks: Awaited<ReturnType<typeof retrieveChunks>>;
+  try {
+    chunks = await retrieveChunks(
+      queryEmbedding,
+      supabase as any,
+      user.id,
+      documentId,
+      4,
+    );
+  } catch (err) {
+    console.error("[generateStream] retrieveChunks failed:", err);
+    throw new AppError(
+      ErrorCode.EMBEDDING_FAILED,
+      `Vector search failed: ${err instanceof Error ? err.message : String(err)}`,
+      500,
+      true,
+    );
+  }
 
-  // ── Step 2.5: Resolve document names ONCE (FIX #11) ────────────────
-  // Reused for both the system prompt's citation labels and the SSE
-  // "sources" event below, so the model and the UI always agree on the
-  // same filename — and so we only hit the DB once for this, not twice.
-  const docNameMap = await fetchDocumentNameMap(chunks, supabase as any);
+  // ── Step 2.5: Resolve document names ────────────────────────────────
+  let docNameMap: Record<string, string>;
+  try {
+    docNameMap = await fetchDocumentNameMap(chunks, supabase as any);
+  } catch (err) {
+    console.error("[generateStream] fetchDocumentNameMap failed:", err);
+    docNameMap = {};
+  }
 
-  // ── Step 3: Build prompt ─────────────────────────────────────────────
+  // ── Step 3: Build message array — NO ChatPromptTemplate ─────────────
+  //
+  // ROOT CAUSE OF ALL PREVIOUS ERRORS:
+  // ChatPromptTemplate.fromMessages() runs an f-string parser over every
+  // string it receives, looking for {variable} placeholders. Document chunks
+  // from real files (JSON, TypeScript, code, etc.) contain curly braces, so
+  // LangChain finds e.g. `{'role':'user','content':'Hello!'}` inside the
+  // system prompt text and throws:
+  //   "Missing value for input variable `'role':'user','content':'Hello!'`"
+  //
+  // SOLUTION: skip ChatPromptTemplate entirely. Build a plain BaseMessage[]
+  // array and pass it directly to groq.stream(). BaseMessage content is
+  // NEVER parsed for template variables — it's always treated as literal text.
+  // This is the correct pattern for RAG pipelines where context is dynamic.
   const systemPrompt = buildSystemPrompt(chunks, docNameMap);
-  const chatHistory = buildChatHistory(existingMessages as any);
+  const chatHistory = buildChatHistory(existingMessages);
 
-  const prompt = ChatPromptTemplate.fromMessages([
-    ["system", systemPrompt],
-    new MessagesPlaceholder("history"),
-    ["human", "{question}"],
-  ]);
+  const messages: BaseMessage[] = [
+    new SystemMessage(systemPrompt), // literal — never f-string parsed
+    ...chatHistory, // already BaseMessage instances
+    new HumanMessage(content), // literal — never f-string parsed
+  ];
 
-  const groq = getGroqClient();
-  const chain = prompt.pipe(groq);
+  // ── Step 4: Init Groq ────────────────────────────────────────────────
+  let groq: ReturnType<typeof getGroqClient>;
+  try {
+    groq = getGroqClient();
+  } catch (err) {
+    console.error("[generateStream] getGroqClient failed:", err);
+    throw new AppError(
+      ErrorCode.GROQ_UNAVAILABLE,
+      `Groq client init failed: ${err instanceof Error ? err.message : String(err)}`,
+      500,
+      false,
+    );
+  }
 
-  // ── Step 4: Stream tokens ────────────────────────────────────────────
+  // ── Step 5: Stream tokens ────────────────────────────────────────────
   let fullContent = "";
   let totalTokens = 0;
 
-  const stream = await chain.stream({
-    history: chatHistory,
-    question: content,
-  });
-
-  for await (const chunk of stream) {
-    const token = typeof chunk.content === "string" ? chunk.content : "";
-    if (!token) continue;
-
-    fullContent += token;
-    totalTokens++;
-
-    yield { type: "token", content: token };
+  let stream: Awaited<ReturnType<typeof groq.stream>>;
+  try {
+    // Call groq.stream() directly with the message array — no chain, no pipe,
+    // no template parsing. Clean, direct, and immune to f-string issues.
+    stream = await groq.stream(messages);
+  } catch (err) {
+    console.error("[generateStream] groq.stream() failed:", err);
+    throw new AppError(
+      ErrorCode.GROQ_UNAVAILABLE,
+      `LLM stream failed to start: ${err instanceof Error ? err.message : String(err)}`,
+      500,
+      true,
+    );
   }
 
-  // ── Step 5: Emit sources ─────────────────────────────────────────────
+  try {
+    for await (const chunk of stream) {
+      const token = typeof chunk.content === "string" ? chunk.content : "";
+      if (!token) continue;
+
+      fullContent += token;
+      totalTokens++;
+
+      yield { type: "token", content: token };
+    }
+  } catch (err) {
+    console.error("[generateStream] Token streaming interrupted:", err);
+    throw new AppError(
+      ErrorCode.STREAM_INTERRUPTED,
+      `Stream interrupted: ${err instanceof Error ? err.message : String(err)}`,
+      500,
+      true,
+    );
+  }
+
+  // ── Step 6: Emit sources ─────────────────────────────────────────────
   const sources = buildSourceCitations(chunks, docNameMap);
   yield { type: "sources", sources };
 
-  // ── Step 6: Persist completed message ───────────────────────────────
-  await supabase
-    .from("chat_messages")
-    .update({
-      content: fullContent,
-      sources: sources.length > 0 ? sources : null,
-    })
-    .eq("id", assistantMsgId);
+  // ── Step 7: Persist completed message ───────────────────────────────
+  try {
+    await supabase
+      .from("chat_messages")
+      .update({
+        content: fullContent,
+        sources: sources.length > 0 ? sources : null,
+      })
+      .eq("id", assistantMsgId);
+  } catch (err) {
+    console.error("[generateStream] Failed to persist assistant message:", err);
+    // Non-fatal — user already received the streamed response
+  }
 
-  // ── Step 7: Done ─────────────────────────────────────────────────────
+  // ── Step 8: Done ─────────────────────────────────────────────────────
   yield { type: "done", messageId: assistantMsgId, totalTokens };
 }

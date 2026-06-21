@@ -13,6 +13,7 @@ export {
   selectIsStreaming,
   selectSessions,
   useSessionList,
+  deriveTitle,
   selectStreamingMessageId,
 } from "./chatStore";
 export { useUIStore, useToast } from "./uiStore";

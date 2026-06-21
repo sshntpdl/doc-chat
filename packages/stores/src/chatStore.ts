@@ -13,7 +13,7 @@ import type {
   AppError,
 } from "@docchat/types";
 import { AppError as Err, ErrorCode } from "@docchat/types";
-import { registerStoreReset } from "./authStore";
+import { registerStoreReset, useAuthStore } from "./authStore";
 import { getApiBase } from "./apiBase";
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
@@ -129,7 +129,17 @@ function newSessionId() {
   return `session_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function deriveTitle(content: string): string {
+/**
+ * deriveTitle — turns the first user message of a session into a short
+ * display title, the same way ChatGPT/Claude/Gemini show a placeholder
+ * title immediately instead of waiting on a round-trip to the server.
+ *
+ * Exported so non-store call sites (e.g. the mobile chat screen, which
+ * streams via its own EventSource implementation instead of going through
+ * `sendMessage()`) can apply the exact same optimistic title logic instead
+ * of leaving sessions stuck at "New Chat".
+ */
+export function deriveTitle(content: string): string {
   const trimmed = content.trim().replace(/\s+/g, " ");
   return trimmed.length > 40 ? trimmed.slice(0, 40) + "…" : trimmed;
 }
@@ -145,6 +155,20 @@ function isEmpty(session: ChatSession): boolean {
  */
 function isLocalTempId(id: string): boolean {
   return id.startsWith("session_");
+}
+
+/**
+ * getAuthToken — reads the current Supabase access token directly from
+ * authStore so every chatStore network call can authenticate on mobile,
+ * where there's no cookie jar (mirrors the Bearer-token pattern already
+ * used by the streaming /api/chat call).
+ */
+function getAuthToken(): string | undefined {
+  return useAuthStore.getState().session?.access_token;
+}
+
+function authHeaders(token?: string): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 function buildUserMessage(
@@ -277,8 +301,10 @@ export const useChatStore = create<ChatStore>()(
                 params.set("cursor", currentPagination.nextCursor);
               }
 
+              const token = getAuthToken();
               const res = await fetch(
                 `${getApiBase()}/api/chat/sessions?${params.toString()}`,
+                { headers: authHeaders(token) },
               );
               const json = await res.json();
 
@@ -287,14 +313,37 @@ export const useChatStore = create<ChatStore>()(
               const incoming: ChatSession[] = json.sessions ?? [];
 
               set((s) => {
-                // Merge fetched sessions into the store, but don't overwrite
-                // sessions that are already fully loaded (have messages).
                 for (const session of incoming) {
-                  if (!s.sessions[session.id]) {
+                  // Only add sessions the client doesn't already know
+                  // about. A session already present locally is either
+                  // the active session (created client-side and possibly
+                  // already renamed from a local temp id to its server id
+                  // — see the SSE "start" handling in sendMessage /
+                  // _handleSSEEvent) or one whose full message history is
+                  // already loaded; in both cases `messages` / `isLoaded`
+                  // must be left alone. We DO sync `title`, since the DB
+                  // row is the source of truth for it and the client may
+                  // only have an optimistic guess.
+                  //
+                  // NOTE: we deliberately do NOT sync `createdAt` here.
+                  // Doing so previously let an already-rendered session's
+                  // sort position shift on a later fetch (e.g. paging in
+                  // more history, or a remount re-syncing page 1), which
+                  // reorders the sidebar list while it may be open and
+                  // makes it possible to tap a different row than the one
+                  // the user intended. `createdAt` only ever affects sort
+                  // order here, and the client's locally-recorded value
+                  // (set at the moment of creation) is a perfectly stable
+                  // sort key for as long as the session lives in this
+                  // client — there's no need to chase the server's value.
+                  const local = s.sessions[session.id];
+
+                  if (!local) {
                     s.sessions[session.id] = session;
+                    continue;
                   }
-                  // If we already have the session but it's a local temp stub,
-                  // keep the existing one (it may have messages).
+
+                  local.title = session.title;
                 }
 
                 s.sessionPagination[documentId] = {
@@ -305,10 +354,19 @@ export const useChatStore = create<ChatStore>()(
                 };
               });
             } catch (err) {
+              // Still flip `hasFetched` to true here. Previously this branch
+              // only cleared `isFetching`, so a failed request (e.g. a 401
+              // from a missing/expired auth token) left `hasFetched` stuck
+              // at `false` forever — which is what kept the sidebar showing
+              // its skeleton indefinitely instead of falling back to an
+              // empty/error state. `hasMore` is left untouched so the next
+              // call to fetchSessions (e.g. re-opening the sidebar) retries.
               set((s) => {
-                if (s.sessionPagination[documentId]) {
-                  s.sessionPagination[documentId].isFetching = false;
+                if (!s.sessionPagination[documentId]) {
+                  s.sessionPagination[documentId] = { ...DEFAULT_PAGINATION };
                 }
+                s.sessionPagination[documentId].isFetching = false;
+                s.sessionPagination[documentId].hasFetched = true;
                 s.error =
                   err instanceof Err
                     ? err
@@ -324,6 +382,7 @@ export const useChatStore = create<ChatStore>()(
           requestNewChat(documentId: string) {
             const { activeSessionId, sessions } = get();
 
+            // A) Active session is already empty AND belongs to THIS document → reuse it
             if (
               activeSessionId &&
               sessions[activeSessionId]?.documentId === documentId &&
@@ -332,6 +391,7 @@ export const useChatStore = create<ChatStore>()(
               return activeSessionId;
             }
 
+            // B) There's an existing empty session for this document (not the active one)
             const existingEmpty = Object.values(sessions).find(
               (s) =>
                 s.documentId === documentId &&
@@ -339,25 +399,27 @@ export const useChatStore = create<ChatStore>()(
                 s.id !== activeSessionId,
             );
             if (existingEmpty) {
-              set((s) => {
-                s.activeSessionId = existingEmpty.id;
-              });
+              // Don't call setActiveSession here — let the caller do it
+              // so we avoid the double-render in the old code path
               return existingEmpty.id;
             }
 
+            // C) No empty session for this document → create one fresh
+            // Prune OTHER empty sessions for this document to avoid accumulation
             const id = newSessionId();
             set((s) => {
               for (const sid of Object.keys(s.sessions)) {
                 if (
                   s.sessions[sid].documentId === documentId &&
-                  isEmpty(s.sessions[sid]) &&
-                  sid !== activeSessionId
+                  isEmpty(s.sessions[sid])
                 ) {
                   delete s.sessions[sid];
                 }
               }
               s.sessions[id] = makeNewSession(id, documentId);
-              s.activeSessionId = id;
+              // NOTE: do NOT set activeSessionId here — caller sets it explicitly
+              // This prevents the double-render where old activeSessionId persists
+              // for one frame after the effect fires.
             });
             return id;
           },
@@ -386,8 +448,10 @@ export const useChatStore = create<ChatStore>()(
             if (existing?.isLoaded) return;
 
             try {
+              const token = getAuthToken();
               const res = await fetch(
                 `${getApiBase()}/api/chat/history/${sessionId}`,
+                { headers: authHeaders(token) },
               );
               const json = await res.json();
               if (!res.ok) throw Err.fromJSON(json.error);
@@ -439,9 +503,13 @@ export const useChatStore = create<ChatStore>()(
             let currentSessionId = sessionId;
 
             try {
+              const token = getAuthToken();
               const res = await fetch(`${getApiBase()}/api/chat`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: {
+                  "Content-Type": "application/json",
+                  ...authHeaders(token),
+                },
                 body: JSON.stringify({
                   sessionId: isLocalTempId(sessionId) ? null : sessionId,
                   content,
@@ -622,8 +690,10 @@ export const useChatStore = create<ChatStore>()(
             });
 
             if (!isLocalTempId(sessionId)) {
+              const token = getAuthToken();
               await fetch(`${getApiBase()}/api/chat/history/${sessionId}`, {
                 method: "DELETE",
+                headers: authHeaders(token),
               }).catch(() => {
                 // Network failure during delete is non-critical.
               });
@@ -672,16 +742,38 @@ export function useCurrentMessages(sessionId: string | null) {
 export function useSessionList(documentId: string) {
   return useChatStore(
     useShallow((s) => {
+      const activeId = s.activeSessionId;
+
       const allSessions = Object.values(s.sessions)
         .filter(
           (sess) =>
             sess.documentId === documentId ||
             (!sess.documentId && documentId === ""),
         )
-        .sort(
-          (a, b) =>
-            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-        );
+        .sort((a, b) => {
+          // Pin a brand-new, never-sent "draft" session to the very top
+          // whenever it's the active one. Its createdAt is "now" so it
+          // would almost always win this comparison anyway — this is a
+          // deterministic guarantee on top of that, independent of any
+          // clock-skew edge case, so the conversation currently on screen
+          // is always easy to find rather than depending purely on
+          // timestamp comparison.
+          //
+          // We deliberately do NOT pin already-persisted conversations
+          // (sessions that have messages). Doing so would re-sort the
+          // list out of its normal chronological order every time the
+          // user switches between two existing chats — exactly the kind
+          // of mid-interaction reordering that makes a tap land on the
+          // wrong row.
+          const aIsActiveDraft = a.id === activeId && a.messages.length === 0;
+          const bIsActiveDraft = b.id === activeId && b.messages.length === 0;
+          if (aIsActiveDraft && !bIsActiveDraft) return -1;
+          if (bIsActiveDraft && !aIsActiveDraft) return 1;
+
+          return (
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+          );
+        });
 
       const pagination = s.sessionPagination[documentId] ?? DEFAULT_PAGINATION;
 
