@@ -12,42 +12,28 @@ import { useAuthStore, setApiBase } from "@docchat/stores";
 import { useEffect, useState } from "react";
 import { supabase } from "../supabase";
 
-// ─── Set API base at module evaluation time ───────────────────────────────────
-//
-// This runs before ANY component mounts or useEffect fires.
-// If this were inside useEffect, fetchDocuments() could fire first with the
-// wrong URL (localhost:3000), causing Network request failed on real devices.
-//
-// EXPO_PUBLIC_API_URL must be set in your .env file and matches your dev
-// machine's LAN IP (e.g. http://192.168.1.65:3000) or production domain.
 setApiBase(process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:3000");
 
 export default function RootLayout() {
   const { initialize, isInitialized, user } = useAuthStore();
   const segments = useSegments();
 
-  // ── Bootstrap Supabase auth on app start ──────────────────────────────────
-  // initialize() restores the persisted AsyncStorage session (if any) and
-  // subscribes to auth state changes. Must run once before route guards.
   useEffect(() => {
     initialize(supabase);
   }, []); // eslint-disable-line
 
-  // ── Route guard ───────────────────────────────────────────────────────────
   useEffect(() => {
     if (!isInitialized) return;
 
     const inAuthGroup = segments[0] === "(auth)";
-    const inAppGroup = segments[0] === "(app)";
 
     if (!user && !inAuthGroup) {
       router.replace("/(auth)/login");
     } else if (user && inAuthGroup) {
-      router.replace("/(app)/documents" as any);
+      router.replace("/(app)/chat" as any);
     }
   }, [isInitialized, user, segments]);
 
-  // ── Deep link handler (magic link / email confirmation) ───────────────────
   useEffect(() => {
     Linking.getInitialURL().then((url) => {
       if (url) handleDeepLink(url, supabase);
@@ -60,9 +46,10 @@ export default function RootLayout() {
     return () => sub.remove();
   }, []);
 
-  // ── Loading screen ────────────────────────────────────────────────────────
   if (!isInitialized) {
     return (
+      // ← Same dark background on the loading screen so there's
+      //   no color jump when the app transitions to the main stack.
       <View
         style={{
           flex: 1,
@@ -71,6 +58,12 @@ export default function RootLayout() {
           backgroundColor: "#0F172A",
         }}
       >
+        {/* StatusBar must be dark even on the loading screen */}
+        <StatusBar
+          style="light"
+          backgroundColor="#0F172A"
+          translucent={false}
+        />
         <Text
           style={{
             color: "#6366F1",
@@ -87,11 +80,32 @@ export default function RootLayout() {
   }
 
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
+    <GestureHandlerRootView style={{ flex: 1, backgroundColor: "#0F172A" }}>
       <SafeAreaProvider>
-        <StatusBar style="auto" />
+        {/*
+          KEY FIXES:
+          1. style="light"      — tells iOS the bg is dark → uses dark chrome,
+                                  no white flash assumption during transitions.
+          2. backgroundColor    — Android: sets the actual status bar bg color.
+          3. translucent=false  — prevents Android from drawing status bar
+                                  over your content with a semi-transparent
+                                  scrim that can appear white during animation.
+        */}
+        <StatusBar
+          style="light"
+          backgroundColor="#0F172A"
+          translucent={false}
+        />
         <OfflineBanner />
-        <Stack screenOptions={{ headerShown: false }} />
+        <Stack
+          screenOptions={{
+            headerShown: false,
+            // This is the fix for the root Stack — every screen
+            // that doesn't set its own contentStyle inherits this,
+            // so the native card scaffold is never white.
+            contentStyle: { backgroundColor: "#0F172A" },
+          }}
+        />
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
@@ -152,7 +166,7 @@ async function handleDeepLink(
 
       if (!error && data.session) {
         useAuthStore.getState().setSession(data.session);
-        router.replace("/(app)/documents" as any);
+        router.replace("/(app)/chat" as any);
       }
     }
   } catch {

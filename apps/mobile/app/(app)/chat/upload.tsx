@@ -1,6 +1,8 @@
-// FILE: apps/mobile/app/(app)/documents/upload.tsx
+// FILE: apps/mobile/app/(app)/chat/upload.tsx
 //
-// Document upload screen for mobile.
+// Document upload screen — opened as a modal from the Chat list (chat/index.tsx)
+// via the "+" button. Lets the user manage documents (upload) without ever
+// leaving the main Chat tab — no separate Library section/tab needed.
 //
 // FLOW:
 //   1. User taps "Pick a file" → expo-document-picker opens native file browser
@@ -10,7 +12,8 @@
 //      - Store uses XHR on web for real byte-level upload progress
 //   4. Poll GET /api/documents/:id every 2s until status = 'ready' (handled by store)
 //   5. Show per-step progress UI: Picked → Uploading → Processing → Ready
-//   6. On completion: navigate to document list or upload another
+//   6. On completion: router.back() returns to chat/index.tsx, whose
+//      useFocusEffect automatically refetches and shows the new document.
 //
 // WHY THE STORE HANDLES UPLOAD, NOT LOCAL XHR:
 //   The documentStore already owns the upload + poll logic and exposes
@@ -302,11 +305,11 @@ export default function UploadScreen() {
                 <>
                   <TouchableOpacity
                     style={s.primaryBtn}
-                    onPress={() => router.replace("/documents")}
+                    onPress={() => router.back()}
                     accessibilityRole="button"
-                    accessibilityLabel="Go to document library"
+                    accessibilityLabel="Back to document list"
                   >
-                    <Text style={s.primaryBtnText}>View in Library</Text>
+                    <Text style={s.primaryBtnText}>Done</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={s.outlineBtn}
