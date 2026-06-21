@@ -1,64 +1,123 @@
 // FILE: /packages/stores/src/chatStore.ts
-//
-// The most performance-critical store in the app.
-//
-// THE STREAMING PROBLEM:
-// AI responses stream ~50 tokens per second. If each token update causes
-// the entire messages array to re-render, we get 50 renders/second which
-// will freeze the UI on low-end devices.
-//
-// THE SOLUTION:
-// appendToken() uses immer's `produce` to mutate ONLY the single message
-// node being streamed. Combined with useShallow on the selector, only the
-// component rendering that specific message will re-render.
-//
-// We use subscribeWithSelector middleware so components can subscribe to
-// deeply-nested paths (e.g., a single message's content) without the
-// selector having to traverse the entire store.
 
-import { create }             from "zustand";
-import { devtools }           from "zustand/middleware";
+import { create } from "zustand";
+import { devtools } from "zustand/middleware";
 import { subscribeWithSelector } from "zustand/middleware";
-import { immer }              from "zustand/middleware/immer";
-import { useShallow }         from "zustand/react/shallow";
+import { immer } from "zustand/middleware/immer";
+import { useShallow } from "zustand/react/shallow";
 import type {
   ChatSession,
   ChatMessage,
   SourceCitation,
   SSEEvent,
   AppError,
-}                             from "@docchat/types";
+} from "@docchat/types";
 import { AppError as Err, ErrorCode } from "@docchat/types";
 import { registerStoreReset } from "./authStore";
+import { getApiBase } from "./apiBase";
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 
+/**
+ * Per-document pagination state for the session list sidebar.
+ * Tracks the cursor (created_at of the last loaded session) and
+ * whether more pages exist.
+ */
+interface SessionPagination {
+  /** ISO-8601 cursor for the next page. null = haven't fetched yet. */
+  nextCursor: string | null;
+  /** False until the first fetch completes. */
+  hasFetched: boolean;
+  /** True when more pages exist on the server. */
+  hasMore: boolean;
+  /** True while a fetch is in flight (prevents concurrent requests). */
+  isFetching: boolean;
+}
+
 interface ChatState {
-  /** All sessions keyed by session ID for O(1) lookup */
-  sessions:           Record<string, ChatSession>;
-  activeSessionId:    string | null;
-  isStreaming:        boolean;
-  /** The ID of the assistant message currently being streamed */
+  sessions: Record<string, ChatSession>;
+  activeSessionId: string | null;
+  isStreaming: boolean;
   streamingMessageId: string | null;
-  error:              AppError | null;
+  error: AppError | null;
+  /**
+   * Per-document pagination cursors.
+   * Key = documentId, Value = pagination state for that document's session list.
+   */
+  sessionPagination: Record<string, SessionPagination>;
 }
 
 interface ChatActions {
-  createSession(documentId?: string):                              string;
-  loadHistory(sessionId: string):                                  Promise<void>;
-  sendMessage(sessionId: string, content: string, documentId?: string): Promise<void>;
-  appendToken(sessionId: string, messageId: string, token: string):  void;
-  attachSources(sessionId: string, messageId: string, sources: SourceCitation[]): void;
-  finalizeStreaming():                                             void;
-  deleteSession(sessionId: string):                               Promise<void>;
-  setActiveSession(sessionId: string | null):                     void;
-  clearError():                                                   void;
-  _reset():                                                       void;
+  /**
+   * ensureSessionForDocument — called by ChatPage on every documentId change.
+   *
+   * Decision tree:
+   *   A) Active session already belongs to this document → do nothing.
+   *   B) An existing EMPTY session for this document exists → activate it.
+   *   C) No suitable session → create a new one.
+   *
+   * Also kicks off the initial session list fetch if not yet loaded.
+   */
+  ensureSessionForDocument(documentId: string): void;
+
+  /**
+   * requestNewChat — called by the "+ New Chat" button.
+   *
+   * Decision tree (same logic as Claude / ChatGPT / Gemini):
+   *   A) Active session is already empty → do nothing (just return its id).
+   *   B) An existing OTHER empty session for this document exists → activate it.
+   *   C) No empty session → create a fresh one and prune other blank sessions.
+   *
+   * Returns the session id that ended up active.
+   */
+  requestNewChat(documentId: string): string;
+
+  createSession(documentId?: string): string;
+  loadHistory(sessionId: string): Promise<void>;
+
+  /**
+   * fetchSessions — loads the next page of sessions for a document.
+   *
+   * Call this:
+   *   - On initial load (called automatically by ensureSessionForDocument)
+   *   - When the user scrolls to the bottom of the session list
+   *
+   * The function is a no-op when:
+   *   - A fetch is already in flight for that document
+   *   - There are no more pages to load
+   */
+  fetchSessions(documentId: string): Promise<void>;
+
+  sendMessage(
+    sessionId: string,
+    content: string,
+    documentId?: string,
+  ): Promise<void>;
+  appendToken(sessionId: string, messageId: string, token: string): void;
+  attachSources(
+    sessionId: string,
+    messageId: string,
+    sources: SourceCitation[],
+  ): void;
+  finalizeStreaming(): void;
+  deleteSession(sessionId: string): Promise<void>;
+  setActiveSession(sessionId: string | null): void;
+  clearError(): void;
+  _reset(): void;
+  /**
+   * _handleSSEEvent — process a single SSE event.
+   *
+   * Returns the effective session ID to use for subsequent events.
+   */
+  _handleSSEEvent(
+    sessionId: string,
+    messageId: string,
+    event: SSEEvent,
+    localTitle: string,
+  ): string;
 }
 
 type ChatStore = ChatState & ChatActions;
-
-const API_BASE = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -66,27 +125,75 @@ function newMessageId() {
   return `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function buildUserMessage(content: string, sessionId: string, userId: string): ChatMessage {
+function newSessionId() {
+  return `session_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function deriveTitle(content: string): string {
+  const trimmed = content.trim().replace(/\s+/g, " ");
+  return trimmed.length > 40 ? trimmed.slice(0, 40) + "…" : trimmed;
+}
+
+/** Returns true when a session has no messages (is a blank "New Chat"). */
+function isEmpty(session: ChatSession): boolean {
+  return session.messages.length === 0;
+}
+
+/**
+ * Returns true when an ID is a local-only temp ID that has never been
+ * persisted server-side.
+ */
+function isLocalTempId(id: string): boolean {
+  return id.startsWith("session_");
+}
+
+function buildUserMessage(
+  content: string,
+  sessionId: string,
+  userId: string,
+): ChatMessage {
   return {
-    id:        newMessageId(),
+    id: newMessageId(),
     sessionId,
     userId,
-    role:      "user",
+    role: "user",
     content,
     createdAt: new Date().toISOString(),
   };
 }
 
-function buildAssistantPlaceholder(sessionId: string, userId: string): ChatMessage {
+function buildAssistantPlaceholder(
+  sessionId: string,
+  userId: string,
+): ChatMessage {
   return {
-    id:        newMessageId(),
+    id: newMessageId(),
     sessionId,
     userId,
-    role:      "assistant",
-    content:   "",       // empty — tokens will append here
+    role: "assistant",
+    content: "",
     createdAt: new Date().toISOString(),
   };
 }
+
+function makeNewSession(id: string, documentId: string): ChatSession {
+  return {
+    id,
+    userId: "",
+    documentId,
+    title: "New Chat",
+    messages: [],
+    createdAt: new Date().toISOString(),
+    isLoaded: true,
+  };
+}
+
+const DEFAULT_PAGINATION: SessionPagination = {
+  nextCursor: null,
+  hasFetched: false,
+  hasMore: true,
+  isFetching: false,
+};
 
 // ─── STORE ────────────────────────────────────────────────────────────────────
 
@@ -95,11 +202,12 @@ export const useChatStore = create<ChatStore>()(
     subscribeWithSelector(
       immer((set, get) => {
         const initialState: ChatState = {
-          sessions:           {},
-          activeSessionId:    null,
-          isStreaming:        false,
+          sessions: {},
+          activeSessionId: null,
+          isStreaming: false,
           streamingMessageId: null,
-          error:              null,
+          error: null,
+          sessionPagination: {},
         };
 
         registerStoreReset(() => get()._reset());
@@ -107,86 +215,235 @@ export const useChatStore = create<ChatStore>()(
         return {
           ...initialState,
 
-          // ── createSession ─────────────────────────────────────────────────
-          // Creates the session locally (lazy — no DB write yet).
-          // The backend creates the DB row on the first chat message.
-          createSession(documentId?: string) {
-            const id = `session_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+          // ── ensureSessionForDocument ──────────────────────────────────────
+          ensureSessionForDocument(documentId: string) {
+            const { activeSessionId, sessions } = get();
 
+            // A) Already on the right document
+            if (
+              activeSessionId &&
+              sessions[activeSessionId]?.documentId === documentId
+            ) {
+              // Still kick off the session list fetch if not yet loaded
+              get().fetchSessions(documentId);
+              return;
+            }
+
+            // B) Re-use an existing empty session for this document
+            const existingEmpty = Object.values(sessions).find(
+              (s) => s.documentId === documentId && isEmpty(s),
+            );
+            if (existingEmpty) {
+              set((s) => {
+                s.activeSessionId = existingEmpty.id;
+              });
+              get().fetchSessions(documentId);
+              return;
+            }
+
+            // C) Create a fresh local session and start loading history
+            const id = newSessionId();
+            set((s) => {
+              s.sessions[id] = makeNewSession(id, documentId);
+              s.activeSessionId = id;
+            });
+            get().fetchSessions(documentId);
+          },
+
+          // ── fetchSessions ─────────────────────────────────────────────────
+          async fetchSessions(documentId: string) {
+            const pagination =
+              get().sessionPagination[documentId] ?? DEFAULT_PAGINATION;
+
+            // Guard: don't fire concurrent requests or fetch beyond the last page
+            if (pagination.isFetching) return;
+            if (pagination.hasFetched && !pagination.hasMore) return;
+
+            set((s) => {
+              if (!s.sessionPagination[documentId]) {
+                s.sessionPagination[documentId] = { ...DEFAULT_PAGINATION };
+              }
+              s.sessionPagination[documentId].isFetching = true;
+            });
+
+            try {
+              const params = new URLSearchParams({
+                documentId,
+                limit: "15",
+              });
+
+              const currentPagination = get().sessionPagination[documentId];
+              if (currentPagination?.nextCursor) {
+                params.set("cursor", currentPagination.nextCursor);
+              }
+
+              const res = await fetch(
+                `${getApiBase()}/api/chat/sessions?${params.toString()}`,
+              );
+              const json = await res.json();
+
+              if (!res.ok) throw Err.fromJSON(json.error);
+
+              const incoming: ChatSession[] = json.sessions ?? [];
+
+              set((s) => {
+                // Merge fetched sessions into the store, but don't overwrite
+                // sessions that are already fully loaded (have messages).
+                for (const session of incoming) {
+                  if (!s.sessions[session.id]) {
+                    s.sessions[session.id] = session;
+                  }
+                  // If we already have the session but it's a local temp stub,
+                  // keep the existing one (it may have messages).
+                }
+
+                s.sessionPagination[documentId] = {
+                  nextCursor: json.nextCursor ?? null,
+                  hasFetched: true,
+                  hasMore: json.hasMore ?? false,
+                  isFetching: false,
+                };
+              });
+            } catch (err) {
+              set((s) => {
+                if (s.sessionPagination[documentId]) {
+                  s.sessionPagination[documentId].isFetching = false;
+                }
+                s.error =
+                  err instanceof Err
+                    ? err
+                    : new Err(
+                        ErrorCode.NETWORK_ERROR,
+                        "Failed to load sessions",
+                      );
+              });
+            }
+          },
+
+          // ── requestNewChat ────────────────────────────────────────────────
+          requestNewChat(documentId: string) {
+            const { activeSessionId, sessions } = get();
+
+            if (
+              activeSessionId &&
+              sessions[activeSessionId]?.documentId === documentId &&
+              isEmpty(sessions[activeSessionId])
+            ) {
+              return activeSessionId;
+            }
+
+            const existingEmpty = Object.values(sessions).find(
+              (s) =>
+                s.documentId === documentId &&
+                isEmpty(s) &&
+                s.id !== activeSessionId,
+            );
+            if (existingEmpty) {
+              set((s) => {
+                s.activeSessionId = existingEmpty.id;
+              });
+              return existingEmpty.id;
+            }
+
+            const id = newSessionId();
+            set((s) => {
+              for (const sid of Object.keys(s.sessions)) {
+                if (
+                  s.sessions[sid].documentId === documentId &&
+                  isEmpty(s.sessions[sid]) &&
+                  sid !== activeSessionId
+                ) {
+                  delete s.sessions[sid];
+                }
+              }
+              s.sessions[id] = makeNewSession(id, documentId);
+              s.activeSessionId = id;
+            });
+            return id;
+          },
+
+          // ── createSession ─────────────────────────────────────────────────
+          createSession(documentId?: string) {
+            const id = newSessionId();
             set((s) => {
               s.sessions[id] = {
                 id,
-                userId:     "",       // filled in after first server response
+                userId: "",
                 documentId: documentId ?? null,
-                title:      "New Chat",
-                messages:   [],
-                createdAt:  new Date().toISOString(),
-                isLoaded:   true,     // new session has no history to load
+                title: "New Chat",
+                messages: [],
+                createdAt: new Date().toISOString(),
+                isLoaded: true,
               };
               s.activeSessionId = id;
             });
-
             return id;
           },
 
           // ── loadHistory ───────────────────────────────────────────────────
           async loadHistory(sessionId: string) {
             const existing = get().sessions[sessionId];
-            // Skip if already loaded to prevent redundant API calls
             if (existing?.isLoaded) return;
 
             try {
-              const res  = await fetch(`${API_BASE}/api/chat/history/${sessionId}`);
+              const res = await fetch(
+                `${getApiBase()}/api/chat/history/${sessionId}`,
+              );
               const json = await res.json();
-
               if (!res.ok) throw Err.fromJSON(json.error);
 
               set((s) => {
-                s.sessions[sessionId] = {
-                  ...json.session,
-                  isLoaded: true,
-                };
+                s.sessions[sessionId] = { ...json.session, isLoaded: true };
               });
             } catch (err) {
               set((s) => {
-                s.error = err instanceof Err
-                  ? err
-                  : new Err(ErrorCode.NETWORK_ERROR, "Failed to load chat history");
+                s.error =
+                  err instanceof Err
+                    ? err
+                    : new Err(
+                        ErrorCode.NETWORK_ERROR,
+                        "Failed to load chat history",
+                      );
               });
             }
           },
 
           // ── sendMessage ───────────────────────────────────────────────────
-          // Full SSE streaming flow:
-          // 1. Optimistically add user message + empty assistant placeholder
-          // 2. POST /api/chat → receive ReadableStream (SSE)
-          // 3. Parse each SSE event and dispatch to store actions
-          // 4. On 'done', finalize streaming state
-          async sendMessage(sessionId: string, content: string, documentId?: string) {
+          async sendMessage(
+            sessionId: string,
+            content: string,
+            documentId?: string,
+          ) {
             const session = get().sessions[sessionId];
             if (!session) return;
 
-            // Placeholder user for local messages (real userId comes from server)
             const userId = "local";
+            const userMsg = buildUserMessage(content, sessionId, userId);
+            const assistantMsg = buildAssistantPlaceholder(sessionId, userId);
 
-            const userMsg       = buildUserMessage(content, sessionId, userId);
-            const assistantMsg  = buildAssistantPlaceholder(sessionId, userId);
+            const isFirstMessage = session.messages.length === 0;
+            const localTitle = isFirstMessage
+              ? deriveTitle(content)
+              : session.title;
 
-            // Step 1: Optimistically add both messages
             set((s) => {
+              if (isFirstMessage) {
+                s.sessions[sessionId].title = localTitle;
+              }
               s.sessions[sessionId].messages.push(userMsg, assistantMsg);
-              s.isStreaming        = true;
+              s.isStreaming = true;
               s.streamingMessageId = assistantMsg.id;
-              s.error              = null;
+              s.error = null;
             });
 
+            let currentSessionId = sessionId;
+
             try {
-              // Step 2: Start SSE stream
-              const res = await fetch(`${API_BASE}/api/chat`, {
-                method:  "POST",
+              const res = await fetch(`${getApiBase()}/api/chat`, {
+                method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body:    JSON.stringify({
-                  sessionId,
+                body: JSON.stringify({
+                  sessionId: isLocalTempId(sessionId) ? null : sessionId,
                   content,
                   documentId: documentId ?? session.documentId,
                 }),
@@ -197,172 +454,247 @@ export const useChatStore = create<ChatStore>()(
                 throw Err.fromJSON(json.error);
               }
 
-              // Step 3: Parse SSE stream
-              const reader  = res.body.getReader();
+              const reader = res.body.getReader();
               const decoder = new TextDecoder();
-              let   buffer  = "";
+              let buffer = "";
 
               while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
 
-                // SSE chunks may arrive split across multiple reads
                 buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split("\n");
-                buffer = lines.pop() ?? "";  // keep incomplete line in buffer
+                buffer = lines.pop() ?? "";
 
                 for (const line of lines) {
-                  // SSE format: "data: {...json...}"
                   if (!line.startsWith("data: ")) continue;
                   const jsonStr = line.slice(6).trim();
                   if (!jsonStr || jsonStr === "[DONE]") continue;
 
                   try {
                     const event = JSON.parse(jsonStr) as SSEEvent;
-                    get()._handleSSEEvent(sessionId, assistantMsg.id, event);
+                    currentSessionId = get()._handleSSEEvent(
+                      currentSessionId,
+                      assistantMsg.id,
+                      event,
+                      localTitle,
+                    );
                   } catch {
-                    // Malformed JSON in stream — skip this event
+                    // Malformed JSON in stream — skip
                   }
                 }
               }
             } catch (err) {
               set((s) => {
-                // Update the assistant placeholder to show an error state
-                const msgIdx = s.sessions[sessionId]?.messages.findIndex(
-                  (m) => m.id === assistantMsg.id
-                );
-                if (msgIdx !== undefined && msgIdx >= 0) {
-                  s.sessions[sessionId].messages[msgIdx].content =
-                    "Sorry, I encountered an error. Please try again.";
+                const targetSession = s.sessions[currentSessionId];
+                if (targetSession) {
+                  const msgIdx = targetSession.messages.findIndex(
+                    (m) => m.id === assistantMsg.id,
+                  );
+                  if (msgIdx >= 0) {
+                    targetSession.messages[msgIdx].content =
+                      "Sorry, I encountered an error. Please try again.";
+                  }
                 }
-                s.error = err instanceof Err
-                  ? err
-                  : new Err(ErrorCode.STREAM_INTERRUPTED, "Stream interrupted");
+                s.error =
+                  err instanceof Err
+                    ? err
+                    : new Err(
+                        ErrorCode.STREAM_INTERRUPTED,
+                        "Stream interrupted",
+                      );
               });
               get().finalizeStreaming();
             }
           },
 
-          // ── _handleSSEEvent (private) ──────────────────────────────────────
-          _handleSSEEvent(sessionId: string, messageId: string, event: SSEEvent) {
+          // ── _handleSSEEvent ───────────────────────────────────────────────
+          _handleSSEEvent(
+            sessionId: string,
+            messageId: string,
+            event: SSEEvent,
+            localTitle: string,
+          ): string {
             switch (event.type) {
-              case "start":
-                // Server has confirmed the session ID (may differ if session was lazy)
-                // We could sync the session ID here if needed
-                break;
+              case "start": {
+                if (event.sessionId && event.sessionId !== sessionId) {
+                  set((s) => {
+                    const existing = s.sessions[sessionId];
+                    if (existing) {
+                      s.sessions[event.sessionId] = {
+                        ...existing,
+                        id: event.sessionId,
+                        title: localTitle,
+                        // Mark as truly loaded now that the server has confirmed it
+                        isLoaded: true,
+                      };
+                      delete s.sessions[sessionId];
+                      if (s.activeSessionId === sessionId) {
+                        s.activeSessionId = event.sessionId;
+                      }
+                    }
+                  });
+                  return event.sessionId;
+                }
+                return sessionId;
+              }
 
               case "token":
                 get().appendToken(sessionId, messageId, event.content);
-                break;
+                return sessionId;
 
               case "sources":
                 get().attachSources(sessionId, messageId, event.sources);
-                break;
+                return sessionId;
 
               case "done":
                 get().finalizeStreaming();
-                break;
+                return sessionId;
 
               case "error":
                 set((s) => {
-                  s.error = new Err(event.code, event.message, 500, event.retryable);
+                  s.error = new Err(
+                    event.code,
+                    event.message,
+                    500,
+                    event.retryable,
+                  );
                 });
                 get().finalizeStreaming();
-                break;
+                return sessionId;
+
+              default:
+                return sessionId;
             }
           },
 
           // ── appendToken ───────────────────────────────────────────────────
-          // PERFORMANCE: immer only diffs the changed leaf node (message.content).
-          // React will only re-render the component that reads this specific field
-          // when paired with a fine-grained selector.
           appendToken(sessionId: string, messageId: string, token: string) {
             set((s) => {
               const msg = s.sessions[sessionId]?.messages.find(
-                (m) => m.id === messageId
+                (m) => m.id === messageId,
               );
-              if (msg) {
-                msg.content += token;
-              }
+              if (msg) msg.content += token;
             });
           },
 
           // ── attachSources ─────────────────────────────────────────────────
-          attachSources(sessionId: string, messageId: string, sources: SourceCitation[]) {
+          attachSources(
+            sessionId: string,
+            messageId: string,
+            sources: SourceCitation[],
+          ) {
             set((s) => {
               const msg = s.sessions[sessionId]?.messages.find(
-                (m) => m.id === messageId
+                (m) => m.id === messageId,
               );
-              if (msg) {
-                msg.sources = sources;
-              }
+              if (msg) msg.sources = sources;
             });
           },
 
           // ── finalizeStreaming ──────────────────────────────────────────────
           finalizeStreaming() {
             set((s) => {
-              s.isStreaming        = false;
+              s.isStreaming = false;
               s.streamingMessageId = null;
             });
           },
 
           // ── deleteSession ─────────────────────────────────────────────────
           async deleteSession(sessionId: string) {
+            const { sessions } = get();
+
+            const remaining = Object.values(sessions)
+              .filter((s) => s.id !== sessionId)
+              .sort(
+                (a, b) =>
+                  new Date(b.createdAt).getTime() -
+                  new Date(a.createdAt).getTime(),
+              );
+
+            const nextId = remaining[0]?.id ?? null;
+
             set((s) => {
               delete s.sessions[sessionId];
               if (s.activeSessionId === sessionId) {
-                s.activeSessionId = null;
+                s.activeSessionId = nextId;
               }
             });
 
-            // Fire-and-forget — UI is already updated
-            await fetch(`${API_BASE}/api/chat/history/${sessionId}`, {
-              method: "DELETE",
-            });
+            if (!isLocalTempId(sessionId)) {
+              await fetch(`${getApiBase()}/api/chat/history/${sessionId}`, {
+                method: "DELETE",
+              }).catch(() => {
+                // Network failure during delete is non-critical.
+              });
+            }
           },
 
           setActiveSession(sessionId: string | null) {
-            set((s) => { s.activeSessionId = sessionId; });
+            set((s) => {
+              s.activeSessionId = sessionId;
+            });
           },
 
           clearError() {
-            set((s) => { s.error = null; });
+            set((s) => {
+              s.error = null;
+            });
           },
 
           _reset() {
             set(() => initialState);
           },
         };
-      })
+      }),
     ),
-    { name: "ChatStore" }
-  )
+    { name: "ChatStore" },
+  ),
 );
 
 // ─── SELECTORS ────────────────────────────────────────────────────────────────
 
-/**
- * useCurrentMessages — returns the messages array for a session.
- *
- * HOW useShallow PREVENTS EXCESS RE-RENDERS:
- * Without useShallow, if ANY part of the store changes, the component
- * re-renders because the selector returns a new array reference each time.
- * useShallow does a shallow equality check on the returned value, so
- * re-renders only happen when the array contents actually change.
- *
- * This is critical for the chat sidebar which lists many sessions —
- * a token arriving in session A should not re-render session B's preview.
- */
 export function useCurrentMessages(sessionId: string | null) {
   return useChatStore(
     useShallow((s) =>
-      sessionId ? (s.sessions[sessionId]?.messages ?? []) : []
-    )
+      sessionId ? (s.sessions[sessionId]?.messages ?? []) : [],
+    ),
   );
 }
 
-/** Returns just the streaming state for the stop button */
-export const selectIsStreaming        = (s: ChatStore) => s.isStreaming;
+/**
+ * useSessionList — returns sessions for a document sorted newest-first,
+ * the active-session-is-empty flag, pagination loading state, and a
+ * loadMore callback — all as a single stable object.
+ *
+ * Used exclusively by ChatSidebar so it has one place to subscribe.
+ */
+export function useSessionList(documentId: string) {
+  return useChatStore(
+    useShallow((s) => {
+      const allSessions = Object.values(s.sessions)
+        .filter(
+          (sess) =>
+            sess.documentId === documentId ||
+            (!sess.documentId && documentId === ""),
+        )
+        .sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+        );
+
+      const pagination = s.sessionPagination[documentId] ?? DEFAULT_PAGINATION;
+
+      return {
+        sessions: allSessions,
+        hasMore: pagination.hasMore,
+        isFetching: pagination.isFetching,
+        hasFetched: pagination.hasFetched,
+      };
+    }),
+  );
+}
+
+export const selectIsStreaming = (s: ChatStore) => s.isStreaming;
 export const selectStreamingMessageId = (s: ChatStore) => s.streamingMessageId;
-export const selectSessions           = (s: ChatStore) => s.sessions;
+export const selectSessions = (s: ChatStore) => s.sessions;

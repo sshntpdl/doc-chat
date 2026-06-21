@@ -1,17 +1,4 @@
 // FILE: /apps/mobile/app/_layout.tsx
-//
-// Root layout for the entire mobile app.
-// Responsibilities:
-//   1. Initialize Supabase Auth session (via useAuthStore.initialize)
-//   2. Handle deep links for magic link email verification
-//   3. Show a loading screen until auth is determined
-//   4. Redirect to (auth) or (app) tabs based on session state
-//   5. Show persistent offline banner via NetInfo
-//
-// WHY NOT EXPO AUTH SESSION:
-// We use Supabase's own auth with deep link handling instead of
-// expo-auth-session because Supabase's magic link flow generates its
-// own callback URL that needs to be intercepted and processed.
 
 import { Stack, router, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
@@ -21,20 +8,32 @@ import { View, Text, ActivityIndicator } from "react-native";
 import * as Linking from "expo-linking";
 import NetInfo from "@react-native-community/netinfo";
 import { createBrowserClient } from "@docchat/supabase";
-import { useAuthStore } from "@docchat/stores";
+import { useAuthStore, setApiBase } from "@docchat/stores";
 import { useEffect, useState } from "react";
 import { supabase } from "../supabase";
 
+// ─── Set API base at module evaluation time ───────────────────────────────────
+//
+// This runs before ANY component mounts or useEffect fires.
+// If this were inside useEffect, fetchDocuments() could fire first with the
+// wrong URL (localhost:3000), causing Network request failed on real devices.
+//
+// EXPO_PUBLIC_API_URL must be set in your .env file and matches your dev
+// machine's LAN IP (e.g. http://192.168.1.65:3000) or production domain.
+setApiBase(process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:3000");
+
 export default function RootLayout() {
-  const { initialize, isInitialized, user, session } = useAuthStore();
+  const { initialize, isInitialized, user } = useAuthStore();
   const segments = useSegments();
 
-  // ── Bootstrap auth on app start ──────────────────────────────────────────
+  // ── Bootstrap Supabase auth on app start ──────────────────────────────────
+  // initialize() restores the persisted AsyncStorage session (if any) and
+  // subscribes to auth state changes. Must run once before route guards.
   useEffect(() => {
     initialize(supabase);
   }, []); // eslint-disable-line
 
-  // ── Route guard: redirect based on auth state ─────────────────────────────
+  // ── Route guard ───────────────────────────────────────────────────────────
   useEffect(() => {
     if (!isInitialized) return;
 
@@ -50,12 +49,10 @@ export default function RootLayout() {
 
   // ── Deep link handler (magic link / email confirmation) ───────────────────
   useEffect(() => {
-    // Handle the initial URL if app was opened via a magic link
     Linking.getInitialURL().then((url) => {
       if (url) handleDeepLink(url, supabase);
     });
 
-    // Handle deep links while app is already running
     const sub = Linking.addEventListener("url", ({ url }) => {
       handleDeepLink(url, supabase);
     });
@@ -63,7 +60,7 @@ export default function RootLayout() {
     return () => sub.remove();
   }, []);
 
-  // ── Show loading screen until auth check completes ────────────────────────
+  // ── Loading screen ────────────────────────────────────────────────────────
   if (!isInitialized) {
     return (
       <View
@@ -100,8 +97,8 @@ export default function RootLayout() {
   );
 }
 
-// ─── OFFLINE BANNER ──────────────────────────────────────────────────────────
-// Persistent warning strip shown at top when network is unreachable.
+// ─── OFFLINE BANNER ───────────────────────────────────────────────────────────
+
 function useOfflineState() {
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
 
@@ -117,7 +114,6 @@ function useOfflineState() {
 
 function OfflineBanner() {
   const isConnected = useOfflineState();
-
   if (isConnected !== false) return null;
 
   return (
@@ -139,16 +135,12 @@ function OfflineBanner() {
 }
 
 // ─── MAGIC LINK HANDLER ───────────────────────────────────────────────────────
-// Supabase magic links arrive as docchat://auth/callback#access_token=...
-// We extract the token from the URL fragment and call setSession.
 
 async function handleDeepLink(
   url: string,
   supabase: ReturnType<typeof createBrowserClient>,
 ) {
   try {
-    // Parse fragment params (Supabase puts tokens in the URL hash)
-    const parsed = Linking.parse(url);
     const fragment = url.split("#")[1] ?? "";
     const params = Object.fromEntries(new URLSearchParams(fragment));
 
@@ -164,6 +156,6 @@ async function handleDeepLink(
       }
     }
   } catch {
-    // Malformed deep link — ignore silently
+    // Malformed deep link — ignore
   }
 }

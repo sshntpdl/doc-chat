@@ -26,21 +26,35 @@ const FILE_ICONS: Record<string, string> = {
 export default function DocumentsScreen() {
   const { documents, isLoading, fetchDocuments, deleteDocument } =
     useDocumentStore();
-  const signOut = useAuthStore((s) => s.signOut);
+
+  // FIX: subscribe to both session (for token) AND user (for sign-out detection).
+  // Previously only `session` was read, but after signOut() the session becomes
+  // null before navigation completes — causing a fetchDocuments(undefined) that
+  // hits the server with no token and gets a 401.
   const session = useAuthStore((s) => s.session);
+  const user = useAuthStore((s) => s.user);
+  const signOut = useAuthStore((s) => s.signOut);
   const token = session?.access_token;
 
   const [refreshing, setRefreshing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [multiSelect, setMultiSelect] = useState(false);
 
-  // Fetch on mount
+  // Fetch documents on mount and whenever the token changes.
+  // The token guard inside fetchDocuments() handles the sign-out race:
+  // if token is undefined (user just signed out), fetchDocuments bails
+  // immediately without hitting the server, so we never log a spurious 401.
   useEffect(() => {
-    fetchDocuments(token);
-  }, [token]);
+    // Only fetch when we actually have an authenticated user.
+    // This prevents the post-signOut render cycle from firing a request.
+    if (user && token) {
+      fetchDocuments(token);
+    }
+  }, [token, user]);
 
   // Pull-to-refresh
   const handleRefresh = useCallback(async () => {
+    if (!token) return; // nothing to refresh if signed out
     setRefreshing(true);
     await fetchDocuments(token);
     setRefreshing(false);

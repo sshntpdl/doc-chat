@@ -6,6 +6,7 @@ import { immer } from "zustand/middleware/immer";
 import type { Document, UploadItem, AppError, ErrorCode } from "@docchat/types";
 import { AppError as Err } from "@docchat/types";
 import { registerStoreReset } from "./authStore";
+import { getApiBase } from "./apiBase";
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 
@@ -28,6 +29,15 @@ interface DocumentActions {
   fetchDocuments(token?: string): Promise<void>;
   uploadDocument(file: UploadableFile, token?: string): Promise<void>;
   deleteDocument(id: string, token?: string): Promise<void>;
+  /**
+   * cancelUpload — aborts an in-flight upload XHR and removes the item
+   * from the queue immediately.
+   *
+   * Safe to call at any point during "uploading" or "processing" status.
+   * If the XHR has already completed (status = "ready" | "error") the abort
+   * is a no-op and the item is still removed from the queue.
+   */
+  cancelUpload(tempId: string): void;
   getDocumentById(id: string): Document | undefined;
   clearError(): void;
   _reset(): void;
@@ -60,16 +70,20 @@ function isMobileFile(file: UploadableFile): file is MobileFileDescriptor {
   return "uri" in file;
 }
 
-const API_BASE =
-  process.env.EXPO_PUBLIC_API_URL ??
-  process.env.NEXT_PUBLIC_APP_URL ??
-  "http://localhost:3000";
-
-console.log("[DocumentStore] API_BASE:", API_BASE);
-
 function authHeaders(token?: string): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
+
+// ─── XHR ABORT REGISTRY ───────────────────────────────────────────────────────
+// Kept outside Zustand state (not serialisable / not needed for rendering).
+// Maps tempId → the live XHR so cancelUpload() can abort it.
+const xhrRegistry = new Map<string, XMLHttpRequest>();
+
+// ─── POLL CANCELLATION ────────────────────────────────────────────────────────
+// When a user cancels during the "processing" phase we need to stop the
+// polling loop. A simple Set of cancelled tempIds achieves this without
+// needing AbortController on setInterval.
+const cancelledUploads = new Set<string>();
 
 // ─── STORE ────────────────────────────────────────────────────────────────────
 
@@ -90,13 +104,24 @@ export const useDocumentStore = create<DocumentStore>()(
 
         // ── fetchDocuments ──────────────────────────────────────────────────
         async fetchDocuments(token?: string) {
+          if (!token) {
+            set((s) => {
+              s.isLoading = false;
+              s.documents = [];
+            });
+            return;
+          }
+
           set((s) => {
             s.isLoading = true;
             s.error = null;
           });
 
           try {
-            const res = await fetch(`${API_BASE}/api/documents`, {
+            const url = `${getApiBase()}/api/documents`;
+            console.log("[DocumentStore] fetchDocuments →", url);
+
+            const res = await fetch(url, {
               headers: authHeaders(token),
             });
             const json = await res.json();
@@ -108,6 +133,7 @@ export const useDocumentStore = create<DocumentStore>()(
               s.isLoading = false;
             });
           } catch (err) {
+            console.error("[DocumentStore] fetchDocuments error:", err);
             set((s) => {
               s.error =
                 err instanceof Err
@@ -134,90 +160,156 @@ export const useDocumentStore = create<DocumentStore>()(
             };
           });
 
-          const formData = new FormData();
-
           if (isMobileFile(file)) {
+            await get()._uploadWithFetch(tempId, file as any, token);
+          } else {
+            const formData = new FormData();
+            formData.append("file", file);
+            await get()._uploadWithXHR(tempId, formData, token);
+          }
+        },
+
+        // ── cancelUpload ────────────────────────────────────────────────────
+        cancelUpload(tempId: string) {
+          // 1. Abort the XHR if it is still in flight
+          const xhr = xhrRegistry.get(tempId);
+          if (xhr) {
+            xhr.abort();
+            xhrRegistry.delete(tempId);
+          }
+
+          // 2. Mark as cancelled so the polling loop exits cleanly
+          cancelledUploads.add(tempId);
+
+          // 3. Remove from queue immediately — no error state needed
+          set((s) => {
+            delete s.uploadQueue[tempId];
+          });
+        },
+
+        // ── _uploadWithFetch (mobile — uses XHR under the hood) ────────────
+        async _uploadWithFetch(tempId: string, file: any, token?: string) {
+          return new Promise<void>((resolve, reject) => {
+            const url = `${getApiBase()}/api/ingest`;
+            const xhr = new XMLHttpRequest();
+
+            // Register so cancelUpload() can abort this XHR
+            xhrRegistry.set(tempId, xhr);
+
+            xhr.upload.onprogress = (event) => {
+              if (event.lengthComputable) {
+                const pct = Math.round((event.loaded / event.total) * 90);
+                set((s) => {
+                  if (s.uploadQueue[tempId]) {
+                    s.uploadQueue[tempId].progress = pct;
+                  }
+                });
+              }
+            };
+
+            xhr.onload = () => {
+              xhrRegistry.delete(tempId);
+
+              // If the user cancelled during the XHR, the queue item is
+              // already gone — just resolve and do nothing.
+              if (cancelledUploads.has(tempId)) {
+                cancelledUploads.delete(tempId);
+                resolve();
+                return;
+              }
+
+              if (xhr.status === 200 || xhr.status === 201) {
+                let json: any;
+                try {
+                  json = JSON.parse(xhr.responseText);
+                } catch {
+                  set((s) => {
+                    if (s.uploadQueue[tempId]) {
+                      s.uploadQueue[tempId].status = "error";
+                      s.uploadQueue[tempId].error = "Invalid server response";
+                    }
+                  });
+                  reject(new Error("Invalid server response"));
+                  return;
+                }
+
+                set((s) => {
+                  if (s.uploadQueue[tempId]) {
+                    s.uploadQueue[tempId].status = "processing";
+                    s.uploadQueue[tempId].progress = 100;
+                    s.uploadQueue[tempId].documentId = json.documentId;
+                  }
+                });
+
+                get()
+                  ._pollDocument(tempId, json.documentId, token)
+                  .then(resolve)
+                  .catch(reject);
+              } else {
+                let errMsg = "Upload failed";
+                try {
+                  errMsg =
+                    JSON.parse(xhr.responseText)?.error?.message ?? errMsg;
+                } catch {}
+                set((s) => {
+                  if (s.uploadQueue[tempId]) {
+                    s.uploadQueue[tempId].status = "error";
+                    s.uploadQueue[tempId].error = errMsg;
+                  }
+                });
+                reject(new Error(errMsg));
+              }
+            };
+
+            xhr.onerror = () => {
+              xhrRegistry.delete(tempId);
+              if (cancelledUploads.has(tempId)) {
+                cancelledUploads.delete(tempId);
+                resolve();
+                return;
+              }
+              set((s) => {
+                if (s.uploadQueue[tempId]) {
+                  s.uploadQueue[tempId].status = "error";
+                  s.uploadQueue[tempId].error = "Network error during upload";
+                }
+              });
+              reject(new Error("Network error during upload"));
+            };
+
+            xhr.onabort = () => {
+              xhrRegistry.delete(tempId);
+              // Queue item already removed by cancelUpload() — just resolve.
+              resolve();
+            };
+
+            xhr.ontimeout = () => {
+              xhrRegistry.delete(tempId);
+              set((s) => {
+                if (s.uploadQueue[tempId]) {
+                  s.uploadQueue[tempId].status = "error";
+                  s.uploadQueue[tempId].error = "Upload timed out";
+                }
+              });
+              reject(new Error("Upload timed out"));
+            };
+
+            xhr.open("POST", url);
+            xhr.timeout = 120_000;
+
+            if (token) {
+              xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+            }
+
+            const formData = new FormData();
             formData.append("file", {
               uri: file.uri,
               name: file.name,
               type: file.mimeType,
             } as any);
-          } else {
-            formData.append("file", file);
-          }
 
-          // Mobile uses fetch (XHR causes "Stream Closed" on Android with Next.js)
-          // Web uses XHR for upload progress tracking
-          if (isMobileFile(file)) {
-            await get()._uploadWithFetch(tempId, formData, token);
-          } else {
-            await get()._uploadWithXHR(tempId, formData, token);
-          }
-        },
-
-        // ── _uploadWithFetch (mobile) ───────────────────────────────────────
-        async _uploadWithFetch(
-          tempId: string,
-          formData: FormData,
-          token?: string,
-        ) {
-          try {
-            set((s) => {
-              if (s.uploadQueue[tempId]) s.uploadQueue[tempId].progress = 50;
-            });
-
-            const headers: Record<string, string> = {};
-            if (token) headers["Authorization"] = `Bearer ${token}`;
-            // DO NOT set Content-Type — fetch sets multipart boundary automatically
-
-            console.log("Fetch upload to:", `${API_BASE}/api/ingest`);
-            console.log("Token present:", !!token);
-
-            const res = await fetch(`${API_BASE}/api/ingest`, {
-              method: "POST",
-              headers,
-              body: formData,
-            });
-
-            const text = await res.text();
-            console.log("Upload response status:", res.status);
-            console.log("Upload response body:", text);
-
-            if (!res.ok) {
-              let errMsg = "Upload failed";
-              try {
-                errMsg = JSON.parse(text)?.error?.message ?? errMsg;
-              } catch {}
-              set((s) => {
-                if (s.uploadQueue[tempId]) {
-                  s.uploadQueue[tempId].status = "error";
-                  s.uploadQueue[tempId].error = errMsg;
-                }
-              });
-              throw new Error(errMsg);
-            }
-
-            const json = JSON.parse(text);
-
-            set((s) => {
-              if (s.uploadQueue[tempId]) {
-                s.uploadQueue[tempId].status = "processing";
-                s.uploadQueue[tempId].progress = 100;
-                s.uploadQueue[tempId].documentId = json.documentId;
-              }
-            });
-
-            await get()._pollDocument(tempId, json.documentId, token);
-          } catch (err: any) {
-            console.error("Fetch upload error:", err);
-            set((s) => {
-              if (s.uploadQueue[tempId]) {
-                s.uploadQueue[tempId].status = "error";
-                s.uploadQueue[tempId].error = err?.message ?? "Upload failed";
-              }
-            });
-            throw err;
-          }
+            xhr.send(formData);
+          });
         },
 
         // ── _uploadWithXHR (web, with progress) ────────────────────────────
@@ -228,6 +320,9 @@ export const useDocumentStore = create<DocumentStore>()(
         ) {
           await new Promise<void>((resolve, reject) => {
             const xhr = new XMLHttpRequest();
+
+            // Register so cancelUpload() can abort this XHR
+            xhrRegistry.set(tempId, xhr);
 
             xhr.upload.onprogress = (event) => {
               if (event.lengthComputable) {
@@ -241,8 +336,13 @@ export const useDocumentStore = create<DocumentStore>()(
             };
 
             xhr.onload = () => {
-              console.log("XHR onload — status:", xhr.status);
-              console.log("XHR response:", xhr.responseText);
+              xhrRegistry.delete(tempId);
+
+              if (cancelledUploads.has(tempId)) {
+                cancelledUploads.delete(tempId);
+                resolve();
+                return;
+              }
 
               if (xhr.status === 200 || xhr.status === 201) {
                 const json = JSON.parse(xhr.responseText);
@@ -277,8 +377,12 @@ export const useDocumentStore = create<DocumentStore>()(
             };
 
             xhr.onerror = () => {
-              console.error("XHR error, status:", xhr.status);
-              console.error("XHR response:", xhr.responseText);
+              xhrRegistry.delete(tempId);
+              if (cancelledUploads.has(tempId)) {
+                cancelledUploads.delete(tempId);
+                resolve();
+                return;
+              }
               set((s) => {
                 if (s.uploadQueue[tempId]) {
                   s.uploadQueue[tempId].status = "error";
@@ -288,7 +392,13 @@ export const useDocumentStore = create<DocumentStore>()(
               reject(new Error("Network error during upload"));
             };
 
-            xhr.open("POST", `${API_BASE}/api/ingest`);
+            xhr.onabort = () => {
+              xhrRegistry.delete(tempId);
+              // Queue item already removed by cancelUpload() — just resolve.
+              resolve();
+            };
+
+            xhr.open("POST", `${getApiBase()}/api/ingest`);
             if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
             xhr.send(formData);
           });
@@ -307,9 +417,15 @@ export const useDocumentStore = create<DocumentStore>()(
             await new Promise((r) => setTimeout(r, 2000));
             attempts++;
 
+            // User cancelled during processing phase — exit immediately
+            if (cancelledUploads.has(tempId)) {
+              cancelledUploads.delete(tempId);
+              return;
+            }
+
             try {
               const res = await fetch(
-                `${API_BASE}/api/documents/${documentId}`,
+                `${getApiBase()}/api/documents/${documentId}`,
                 {
                   headers: authHeaders(token),
                 },
@@ -317,6 +433,13 @@ export const useDocumentStore = create<DocumentStore>()(
               const json = await res.json();
 
               if (!res.ok) continue;
+
+              // Check again after the await — user may have cancelled while
+              // the fetch was in flight.
+              if (cancelledUploads.has(tempId)) {
+                cancelledUploads.delete(tempId);
+                return;
+              }
 
               const doc: Document = json.document;
 
@@ -340,7 +463,6 @@ export const useDocumentStore = create<DocumentStore>()(
               }
               // Still "processing" — keep polling
             } catch {
-              // Network blip during poll — keep trying
               continue;
             }
           }
@@ -358,18 +480,16 @@ export const useDocumentStore = create<DocumentStore>()(
         async deleteDocument(id: string, token?: string) {
           const previous = get().documents.find((d) => d.id === id);
 
-          // Optimistic removal
           set((s) => {
             s.documents = s.documents.filter((d) => d.id !== id);
           });
 
-          const res = await fetch(`${API_BASE}/api/documents/${id}`, {
+          const res = await fetch(`${getApiBase()}/api/documents/${id}`, {
             method: "DELETE",
             headers: authHeaders(token),
           });
 
           if (!res.ok && previous) {
-            // Rollback
             set((s) => {
               s.documents.push(previous);
               s.documents.sort(

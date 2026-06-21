@@ -8,10 +8,11 @@
 //   3. Load or create chat session in DB
 //   4. Embed the user's question (HuggingFace)
 //   5. Retrieve top-K chunks (Supabase pgvector)
-//   6. Build LangChain prompt (system + history + context + question)
-//   7. Stream Groq response token-by-token as SSE events
-//   8. After stream ends, emit 'sources' event with citations
-//   9. Persist the completed message to DB
+//   6. Resolve document names once (FIX #11 — shared by prompt + citations)
+//   7. Build LangChain prompt (system + history + context + question)
+//   8. Stream Groq response token-by-token as SSE events
+//   9. After stream ends, emit 'sources' event with citations
+//   10. Persist the completed message to DB
 //
 // TYPE FIX (see bottom note): the previous version derived the Supabase
 // client type as `Awaited<ReturnType<typeof import("@supabase/supabase-js").createClient>>`.
@@ -40,6 +41,7 @@ import {
   retrieveChunks,
   buildChatHistory,
   buildSystemPrompt,
+  fetchDocumentNameMap,
   buildSourceCitations,
   getGroqClient,
 } from "../_lib/langchain";
@@ -222,8 +224,14 @@ async function* generateStream({
     4, // top-K
   );
 
+  // ── Step 2.5: Resolve document names ONCE (FIX #11) ────────────────
+  // Reused for both the system prompt's citation labels and the SSE
+  // "sources" event below, so the model and the UI always agree on the
+  // same filename — and so we only hit the DB once for this, not twice.
+  const docNameMap = await fetchDocumentNameMap(chunks, supabase as any);
+
   // ── Step 3: Build prompt ─────────────────────────────────────────────
-  const systemPrompt = buildSystemPrompt(chunks);
+  const systemPrompt = buildSystemPrompt(chunks, docNameMap);
   const chatHistory = buildChatHistory(existingMessages as any);
 
   const prompt = ChatPromptTemplate.fromMessages([
@@ -255,7 +263,7 @@ async function* generateStream({
   }
 
   // ── Step 5: Emit sources ─────────────────────────────────────────────
-  const sources = await buildSourceCitations(chunks, supabase as any);
+  const sources = buildSourceCitations(chunks, docNameMap);
   yield { type: "sources", sources };
 
   // ── Step 6: Persist completed message ───────────────────────────────

@@ -1,13 +1,146 @@
 // FILE: /apps/web/middleware.ts
+//
+// CHANGES vs previous version:
+//   - Dynamic Content-Security-Policy header (unchanged from before).
+//   - NEW: CORS handling for /api/* routes. This is defense-in-depth on top
+//     of the chatStore.ts fix (which makes the web app call the API
+//     same-origin by default). It matters when something genuinely needs to
+//     call the API cross-origin — a React Native/Expo client, a different
+//     LAN origin than NEXT_PUBLIC_APP_URL, or split web/API domains later.
+//
+// HOW THE NEW CORS HANDLING WORKS:
+//   1. For any request under /api/*, we read the browser's `Origin` header.
+//   2. If it's an OPTIONS preflight, we answer it directly in middleware
+//      with the correct Access-Control-* headers if the origin is allowed
+//      (or with none if not, so the browser blocks it) — and never invoke
+//      the Route Handler at all.
+//   3. For the actual GET/POST/DELETE request, we set the same headers on
+//      the response object before returning it from middleware. Next.js
+//      merges headers set this way into whatever the Route Handler
+//      ultimately returns — the same mechanism the CSP header below
+//      already relies on.
+//
+// NOTE ON COOKIES/AUTH: this app authenticates via Supabase session
+// cookies. Browsers only send cookies on a cross-origin fetch() if the
+// request is made with `credentials: "include"` AND the server responds
+// with a SPECIFIC Access-Control-Allow-Origin (never "*") plus
+// Access-Control-Allow-Credentials: true. We do the server half here. If
+// you ever want the web app itself to call the API cross-origin instead of
+// relying on the same-origin fix in chatStore.ts, you'd also need to add
+// `credentials: "include"` to the fetch() calls there.
 
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { updateSession } from "@docchat/supabase/middleware";
 
-export async function middleware(request: NextRequest) {
-  const { response, user } = await updateSession(request);
-  const { pathname } = request.nextUrl;
+// ─── CSP BUILDER ─────────────────────────────────────────────────────────────
 
+function buildCSP(requestUrl: string): string {
+  const isDev = process.env.NODE_ENV === "development";
+
+  let requestOrigin = "";
+  try {
+    requestOrigin = new URL(requestUrl).origin;
+  } catch {
+    // Malformed URL — skip; 'self' will still cover it in most cases
+  }
+
+  const devConnectOrigins = isDev
+    ? [
+        requestOrigin,
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        ...(process.env.NEXT_PUBLIC_APP_URL
+          ? [process.env.NEXT_PUBLIC_APP_URL]
+          : []),
+      ].filter(Boolean)
+    : [];
+
+  const extraOrigins = [...new Set(devConnectOrigins)];
+
+  const connectSrc = [
+    "'self'",
+    ...extraOrigins,
+    "https://*.supabase.co",
+    "wss://*.supabase.co",
+    "https://api.groq.com",
+    "https://api-inference.huggingface.co",
+  ].join(" ");
+
+  return [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data: blob:",
+    `connect-src ${connectSrc}`,
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
+
+// ─── CORS FOR /api/* ──────────────────────────────────────────────────────────
+
+function isAllowedApiOrigin(origin: string, requestUrl: string): boolean {
+  const isDev = process.env.NODE_ENV === "development";
+
+  if (!isDev) {
+    // Production: only the canonical app URL may call the API cross-origin.
+    return (
+      !!process.env.NEXT_PUBLIC_APP_URL &&
+      origin === process.env.NEXT_PUBLIC_APP_URL
+    );
+  }
+
+  let requestOrigin = "";
+  try {
+    requestOrigin = new URL(requestUrl).origin;
+  } catch {
+    // ignore
+  }
+
+  const allowed = new Set(
+    [
+      requestOrigin, // whatever host this request actually came in on
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+      process.env.NEXT_PUBLIC_APP_URL,
+    ].filter(Boolean) as string[],
+  );
+
+  return allowed.has(origin);
+}
+
+function corsHeaders(origin: string): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    Vary: "Origin",
+  };
+}
+
+// ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
+
+export async function middleware(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+  const origin = request.headers.get("origin");
+
+  // ── CORS preflight short-circuit ────────────────────────────────────────
+  // OPTIONS requests to /api/* never need auth/session logic — answer them
+  // directly and skip the Route Handler entirely.
+  if (pathname.startsWith("/api/") && request.method === "OPTIONS") {
+    const allowed = origin ? isAllowedApiOrigin(origin, request.url) : false;
+    return new NextResponse(null, {
+      status: 204,
+      headers: allowed ? corsHeaders(origin!) : {},
+    });
+  }
+
+  // ── Supabase session refresh ──────────────────────────────────────────────
+  const { response, user } = await updateSession(request);
+
+  // ── Route protection ──────────────────────────────────────────────────────
   const isProtectedRoute =
     pathname.startsWith("/dashboard") || pathname.startsWith("/chat");
 
@@ -24,17 +157,27 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 
+  // ── CORS headers on the actual API response ────────────────────────────────
+  if (
+    pathname.startsWith("/api/") &&
+    origin &&
+    isAllowedApiOrigin(origin, request.url)
+  ) {
+    Object.entries(corsHeaders(origin)).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+  }
+
+  // ── Security headers ──────────────────────────────────────────────────────
+  response.headers.set("Content-Security-Policy", buildCSP(request.url));
+
   return response;
 }
 
+// ─── MATCHER ─────────────────────────────────────────────────────────────────
+
 export const config = {
   matcher: [
-    // Excluded from middleware:
-    // - _next/static, _next/image, favicon.ico  → static assets
-    // - auth/callback                            → PKCE code exchange must run before auth check
-    // - api/auth                                 → set-session and debug routes, no session needed
-    // - api/debug-session                        → diagnostic (already under api/auth if you want,
-    //                                              but kept separate for clarity)
     "/((?!_next/static|_next/image|favicon.ico|auth/callback|api/auth|api/debug-session).*)",
   ],
 };

@@ -2,36 +2,60 @@
 "use client";
 
 import { useState, useMemo, useEffect } from "react";
-import { useRouter }                    from "next/navigation";
+import { useRouter } from "next/navigation";
 import {
   useDocumentStore,
   useUIStore,
   selectDocuments,
   selectUploadQueue,
-}                                       from "@docchat/stores";
-import type { Document }                from "@docchat/types";
-import { DocumentCard }                 from "./DocumentCard";
-import { UploadZone }                   from "../upload/UploadZone";
+} from "@docchat/stores";
+import type { Document } from "@docchat/types";
+import { DocumentCard } from "./DocumentCard";
+import { UploadZone } from "../upload/UploadZone";
 
-interface Props { initialDocuments: Document[] }
+interface Props {
+  initialDocuments: Document[];
+}
+
+// ─── CANCEL ICON ─────────────────────────────────────────────────────────────
+
+function XIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M10.5 3.5L3.5 10.5M3.5 3.5l7 7"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+// ─── COMPONENT ────────────────────────────────────────────────────────────────
 
 export function DocumentGrid({ initialDocuments }: Props) {
-  const router      = useRouter();
-  const documents   = useDocumentStore(selectDocuments);
+  const router = useRouter();
+  const documents = useDocumentStore(selectDocuments);
   const uploadQueue = useDocumentStore(selectUploadQueue);
+  const cancelUpload = useDocumentStore((s) => s.cancelUpload);
   const { openUploadModal, uploadModalOpen, closeUploadModal } = useUIStore();
 
   const [search, setSearch] = useState("");
 
   // Seed Zustand store with server-fetched documents on first render
-  // This avoids a second client-side fetch while keeping the store as SoT
   useEffect(() => {
     if (documents.length === 0 && initialDocuments.length > 0) {
       useDocumentStore.setState({ documents: initialDocuments });
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Client-side search — instant, no debounce needed for <200 items
   const filtered = useMemo(() => {
     if (!search.trim()) return documents;
     const q = search.toLowerCase();
@@ -79,7 +103,9 @@ export function DocumentGrid({ initialDocuments }: Props) {
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4
                      bg-black/50 backdrop-blur-sm"
-          onClick={(e) => { if (e.target === e.currentTarget) closeUploadModal(); }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closeUploadModal();
+          }}
           role="dialog"
           aria-modal="true"
           aria-label="Upload document"
@@ -106,55 +132,119 @@ export function DocumentGrid({ initialDocuments }: Props) {
         </div>
       )}
 
-      {/* Active uploads progress */}
+      {/* Active uploads */}
       {queueItems.length > 0 && (
         <div className="space-y-2">
-          <h3 className="text-sm font-medium text-[var(--color-muted)]">Uploading</h3>
-          {queueItems.map((item) => (
-            <div
-              key={item.tempId}
-              className="flex items-center gap-3 p-3 rounded-[var(--radius-md)]
-                         bg-[var(--color-surface)] border border-[var(--color-border)]"
-            >
-              <span className="text-xl" aria-hidden="true">📄</span>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-[var(--color-foreground)] truncate">
-                  {item.fileName}
-                </p>
-                <div className="mt-1.5 h-1.5 bg-[var(--color-border)] rounded-full overflow-hidden">
+          <h3 className="text-sm font-medium text-[var(--color-muted)]">
+            Uploading
+          </h3>
+
+          {queueItems.map((item) => {
+            const isActive =
+              item.status === "uploading" || item.status === "processing";
+
+            return (
+              <div
+                key={item.tempId}
+                className="flex items-center gap-3 p-3 rounded-[var(--radius-md)]
+                           bg-[var(--color-surface)] border border-[var(--color-border)]"
+              >
+                {/* File icon */}
+                <span className="text-xl shrink-0" aria-hidden="true">
+                  📄
+                </span>
+
+                {/* Progress info */}
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-[var(--color-foreground)] truncate">
+                    {item.fileName}
+                  </p>
+
+                  {/* Progress bar */}
                   <div
-                    className="h-full bg-[var(--color-primary)] rounded-full transition-all duration-300"
-                    style={{ width: `${item.progress}%` }}
+                    className="mt-1.5 h-1.5 bg-[var(--color-border)] rounded-full overflow-hidden"
                     role="progressbar"
                     aria-valuenow={item.progress}
                     aria-valuemin={0}
                     aria-valuemax={100}
-                  />
+                  >
+                    <div
+                      className={`h-full rounded-full transition-all duration-300
+                        ${
+                          item.status === "processing"
+                            ? "bg-[var(--color-warning)] w-full animate-pulse"
+                            : item.status === "error"
+                              ? "bg-[var(--color-destructive)]"
+                              : "bg-[var(--color-primary)]"
+                        }`}
+                      style={
+                        item.status === "uploading"
+                          ? { width: `${item.progress}%` }
+                          : undefined
+                      }
+                    />
+                  </div>
+
+                  {/* Status text */}
+                  <p
+                    className={`mt-1 text-xs ${
+                      item.status === "error"
+                        ? "text-[var(--color-destructive)]"
+                        : "text-[var(--color-muted)]"
+                    }`}
+                  >
+                    {item.status === "uploading"
+                      ? `Uploading… ${item.progress}%`
+                      : item.status === "processing"
+                        ? "Processing…"
+                        : item.status === "error"
+                          ? `Error: ${item.error}`
+                          : "Ready"}
+                  </p>
                 </div>
-                <p className="mt-1 text-xs text-[var(--color-muted)]">
-                  {item.status === "uploading"
-                    ? `Uploading… ${item.progress}%`
-                    : item.status === "processing"
-                    ? "Processing…"
-                    : item.status === "error"
-                    ? `Error: ${item.error}`
-                    : "Ready"}
-                </p>
+
+                {/*
+                 * Cancel / dismiss button.
+                 *
+                 * uploading  → aborts the XHR and removes the card
+                 * processing → stops polling and removes the card
+                 * error      → dismisses the error card
+                 * ready      → dismisses the completed card
+                 */}
+                <button
+                  onClick={() => cancelUpload(item.tempId)}
+                  aria-label={
+                    isActive
+                      ? `Cancel upload of ${item.fileName}`
+                      : `Dismiss ${item.fileName}`
+                  }
+                  title={isActive ? "Cancel upload" : "Dismiss"}
+                  className="shrink-0 w-6 h-6 flex items-center justify-center
+                             rounded-full text-[var(--color-muted)]
+                             hover:text-[var(--color-foreground)]
+                             hover:bg-[var(--color-surface-hover)]
+                             transition-colors"
+                >
+                  <XIcon />
+                </button>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
       {/* Empty state */}
       {documents.length === 0 && queueItems.length === 0 && (
         <div className="flex flex-col items-center justify-center py-24 text-center">
-          <div className="text-6xl mb-6 select-none" aria-hidden="true">📚</div>
+          <div className="text-6xl mb-6 select-none" aria-hidden="true">
+            📚
+          </div>
           <h2 className="text-xl font-semibold text-[var(--color-foreground)]">
             Your knowledge base is empty
           </h2>
           <p className="mt-2 text-[var(--color-muted)] max-w-sm">
-            Upload a PDF or Markdown file to start chatting with your documents using AI.
+            Upload a PDF or Markdown file to start chatting with your documents
+            using AI.
           </p>
           <button
             onClick={openUploadModal}
@@ -170,7 +260,9 @@ export function DocumentGrid({ initialDocuments }: Props) {
       {/* Search empty state */}
       {search && filtered.length === 0 && documents.length > 0 && (
         <div className="flex flex-col items-center justify-center py-16 text-center">
-          <div className="text-4xl mb-4 select-none" aria-hidden="true">🔍</div>
+          <div className="text-4xl mb-4 select-none" aria-hidden="true">
+            🔍
+          </div>
           <p className="text-[var(--color-foreground)] font-medium">
             No documents matching "{search}"
           </p>
@@ -183,7 +275,7 @@ export function DocumentGrid({ initialDocuments }: Props) {
         </div>
       )}
 
-      {/* Document grid: 3 cols desktop, 2 tablet, 1 mobile */}
+      {/* Document grid */}
       {filtered.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {filtered.map((doc) => (

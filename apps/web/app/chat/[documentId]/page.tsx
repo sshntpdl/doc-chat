@@ -1,25 +1,20 @@
 // FILE: apps/web/app/chat/[documentId]/page.tsx
 "use client";
 //
-// FIXES vs previous version:
+// CHANGES vs v3:
 //
-// 1. `use` from React removed — only available in @types/react 19+.
-//    Replaced with `useParams<{ documentId: string }>()` from next/navigation,
-//    which is the correct approach for "use client" pages in Next.js 15.
-//    Server Components should use `await params`; Client Components use `useParams`.
+// 1. handleSelectSession — when the user clicks a session in the sidebar that
+//    was fetched as a stub (isLoaded = false), we call loadHistory() to hydrate
+//    its messages before activating it. This is lazy loading: we don't fetch
+//    every session's full message history upfront, only on demand.
 //
-// 2. `params: Promise<...>` prop type removed — Client Components in Next.js 15
-//    do NOT receive params as a Promise. Only Server Components do.
-//    useParams() reads the same value with full TypeScript safety.
+// 2. handleNewChat now calls requestNewChat(documentId) instead of
+//    createSession(documentId). requestNewChat() refuses to create a new
+//    session when the active session is already empty — matching Claude /
+//    ChatGPT / Gemini behaviour.
 //
-// 3. `selectStreamingMessageId` is now imported properly from @docchat/stores
-//    (was accessed inline before which bypassed the selector pattern).
-//
-// 4. `handleSend` wrapped with proper null-guards so TypeScript doesn't
-//    complain about `activeSessionId` potentially being null inside the callback.
-//
-// 5. `setTimeout` inside `onSelect` replaced with direct `sendMessage` call
-//    to avoid closure-over-stale-state bugs.
+// 3. ensureSessionForDocument dependency array is correct (documentId only).
+//    The action itself is stable (defined inside immer, never re-created).
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "next/navigation";
@@ -36,61 +31,44 @@ import { ChatSidebar } from "@/components/chat/ChatSidebar";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { SuggestedQuestions } from "@/components/chat/SuggestedQuestions";
 
-// ─── PAGE ────────────────────────────────────────────────────────────────────
-// No props needed — route params come from useParams().
-
 export default function ChatPage() {
-  // ── Route params ─────────────────────────────────────────────────────────
-  // useParams() is the correct hook for "use client" pages.
-  // TypeScript generic ensures documentId is typed as string (not string | string[]).
   const { documentId } = useParams<{ documentId: string }>();
 
-  // ── Store slices ──────────────────────────────────────────────────────────
   const doc = useDocumentStore((s) => s.getDocumentById(documentId));
   const fetchDocuments = useDocumentStore((s) => s.fetchDocuments);
 
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
 
-  // Fine-grained selectors — each one only re-renders this component when
-  // its specific slice changes, not on every store update.
   const isStreaming = useChatStore(selectIsStreaming);
   const streamingMessageId = useChatStore(selectStreamingMessageId);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const createSession = useChatStore((s) => s.createSession);
+  const sessions = useChatStore((s) => s.sessions);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const setActiveSession = useChatStore((s) => s.setActiveSession);
+  const loadHistory = useChatStore((s) => s.loadHistory);
   const finalizeStreaming = useChatStore((s) => s.finalizeStreaming);
+  const ensureSessionForDocument = useChatStore(
+    (s) => s.ensureSessionForDocument,
+  );
+  const requestNewChat = useChatStore((s) => s.requestNewChat);
 
-  // useCurrentMessages uses useShallow internally so only the active
-  // session's messages trigger a re-render of this component.
   const messages = useCurrentMessages(activeSessionId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const [input, setInput] = useState<string>("");
 
   // ── Effects ───────────────────────────────────────────────────────────────
 
-  // If user navigates directly to /chat/:id the document store may be empty.
-  // Fetch all documents to populate the sidebar document info.
   useEffect(() => {
-    if (!doc) {
-      fetchDocuments();
-    }
+    if (!doc) fetchDocuments();
   }, [doc, fetchDocuments]);
 
-  // Create a fresh session when the page first mounts (if none is active).
-  // The empty dep array is intentional — we only want this on mount.
+  // Ensures a session exists for this document and kicks off session list fetch.
   useEffect(() => {
-    if (!activeSessionId) {
-      const id = createSession(documentId);
-      setActiveSession(id);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    ensureSessionForDocument(documentId);
+  }, [documentId, ensureSessionForDocument]);
 
-  // Auto-scroll the messages list to the latest message.
-  // Triggers on new messages and while streaming (token by token).
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, isStreaming]);
@@ -99,27 +77,43 @@ export default function ChatPage() {
 
   const handleSend = useCallback(async () => {
     const trimmed = input.trim();
-    // Guard: need content, no active stream, and a valid session
     if (!trimmed || isStreaming || !activeSessionId) return;
-
     setInput("");
     await sendMessage(activeSessionId, trimmed, documentId);
   }, [input, isStreaming, activeSessionId, sendMessage, documentId]);
 
-  // Called when the Stop button (■) is clicked during streaming
   function handleStop() {
     finalizeStreaming();
   }
 
-  // Start a fresh chat session in this document's context
   function handleNewChat() {
-    const id = createSession(documentId);
-    setActiveSession(id);
+    requestNewChat(documentId);
+    inputRef.current?.focus();
   }
 
-  // Called when user taps a suggested question chip.
-  // Sends directly without routing through the input field to avoid
-  // a stale-closure bug that occurred with the previous setTimeout approach.
+  /**
+   * handleSelectSession — called when the user clicks a session row in the sidebar.
+   *
+   * If the session is a stub (fetched from server list, not yet fully loaded),
+   * we call loadHistory() first so the message list is populated.
+   * setActiveSession runs immediately so the UI highlights the row without
+   * waiting for the network — the message area will show a brief empty state
+   * then populate once loadHistory resolves.
+   */
+  const handleSelectSession = useCallback(
+    async (id: string) => {
+      // Activate immediately for snappy UI
+      setActiveSession(id);
+
+      const session = sessions[id];
+      if (session && !session.isLoaded) {
+        // Lazy-load the full message history for this session stub
+        await loadHistory(id);
+      }
+    },
+    [sessions, setActiveSession, loadHistory],
+  );
+
   const handleSuggestedQuestion = useCallback(
     async (question: string) => {
       if (isStreaming || !activeSessionId) return;
@@ -134,17 +128,16 @@ export default function ChatPage() {
 
   return (
     <div className="flex h-screen bg-[var(--color-background)] overflow-hidden">
-      {/* ── LEFT SIDEBAR ──────────────────────────────────────────────── */}
       <ChatSidebar
         document={doc}
+        documentId={documentId}
         collapsed={sidebarCollapsed}
         onToggle={toggleSidebar}
         activeSessionId={activeSessionId}
-        onSelectSession={(id: string) => setActiveSession(id)}
+        onSelectSession={handleSelectSession}
         onNewChat={handleNewChat}
       />
 
-      {/* ── MAIN CHAT COLUMN ──────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Top bar */}
         <div
@@ -152,7 +145,6 @@ export default function ChatPage() {
                      border-b border-[var(--color-border)]
                      bg-[var(--color-background)]"
         >
-          {/* Sidebar toggle */}
           <button
             onClick={toggleSidebar}
             aria-label={
@@ -166,7 +158,6 @@ export default function ChatPage() {
             {sidebarCollapsed ? "→" : "←"}
           </button>
 
-          {/* Document name breadcrumb */}
           <span
             className="text-sm font-medium text-[var(--color-foreground)] truncate"
             title={doc?.name}
@@ -175,32 +166,26 @@ export default function ChatPage() {
           </span>
         </div>
 
-        {/* ── Messages area ───────────────────────────────────────────── */}
+        {/* Messages area */}
         <div className="flex-1 overflow-y-auto px-4 py-6">
           <div className="max-w-2xl mx-auto space-y-6">
-            {/* Empty state: suggested questions when chat is new */}
             {isEmpty && (
               <SuggestedQuestions onSelect={handleSuggestedQuestion} />
             )}
 
-            {/* Message bubbles */}
             {messages.map((message) => (
               <MessageBubble
                 key={message.id}
                 message={message}
-                isStreaming={
-                  // Only the actively-streaming message gets the cursor
-                  isStreaming && message.id === streamingMessageId
-                }
+                isStreaming={isStreaming && message.id === streamingMessageId}
               />
             ))}
 
-            {/* Invisible anchor element — scrolled into view on new messages */}
             <div ref={messagesEndRef} aria-hidden="true" />
           </div>
         </div>
 
-        {/* ── Input bar ───────────────────────────────────────────────── */}
+        {/* Input bar */}
         <ChatInput
           value={input}
           onChange={setInput}
