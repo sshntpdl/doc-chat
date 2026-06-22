@@ -15,7 +15,6 @@ export default function LoginPage() {
   const { signInWithEmail, signUpWithEmail, signInWithMagicLink, isLoading } =
     useAuthStore();
 
-  // ── NEW: watch user + isInitialized from the store ────────────────────
   const user = useAuthStore((s) => s.user);
   const isInitialized = useAuthStore((s) => s.isInitialized);
 
@@ -31,7 +30,10 @@ export default function LoginPage() {
   const [countdown, setCountdown] = useState(0);
   const [isPending, startTransition] = useTransition();
 
-  // ── Navigate once session cookies are confirmed written ────────────────
+  // ── Redirect if already authenticated ─────────────────────────────────
+  // This handles the case where the user lands on /login already logged in
+  // (e.g. back navigation). Does NOT handle post-sign-in redirect —
+  // that's done explicitly in handleEmailAuth below.
   useEffect(() => {
     if (isInitialized && user) {
       router.replace(redirectTo);
@@ -45,7 +47,7 @@ export default function LoginPage() {
     return () => clearTimeout(timer);
   }, [countdown]);
 
-  // ── Validation (on-blur, not on-submit) ────────────────────────────────
+  // ── Validation ─────────────────────────────────────────────────────────
   function validateEmail(val: string) {
     if (!val) return "Email is required";
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)) return "Enter a valid email";
@@ -73,16 +75,29 @@ export default function LoginPage() {
 
     startTransition(() => {
       (async () => {
-        const err =
-          mode === "signup"
-            ? await signUpWithEmail(email, password)
-            : await signInWithEmail(email, password);
+        if (mode === "signup") {
+          const err = await signUpWithEmail(email, password);
+          if (err) {
+            setError(err.message);
+          } else {
+            setMode("magic-sent"); // show "check your email" for verification
+          }
+          return;
+        }
 
+        // ── Sign-in path ───────────────────────────────────────────────
+        const err = await signInWithEmail(email, password);
         if (err) {
           setError(err.message);
-        } else if (mode === "signup") {
-          setMode("magic-sent"); // show "check your email" for verification
+          return;
         }
+
+        // FIX: Explicitly redirect after sign-in instead of relying on
+        // the useEffect above. router.refresh() forces Next.js to
+        // re-run middleware so it sees the new Supabase session cookie,
+        // then replace navigates to the dashboard.
+        router.refresh();
+        router.replace(redirectTo);
       })();
     });
   }
@@ -116,7 +131,6 @@ export default function LoginPage() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[var(--color-background)] p-4">
         <div className="w-full max-w-md text-center space-y-6">
-          {/* Animated envelope icon */}
           <div
             className="text-7xl animate-bounce select-none"
             aria-hidden="true"
@@ -159,10 +173,10 @@ export default function LoginPage() {
     );
   }
 
-  // ── Main form layout ───────────────────────────────────────────────────
+  // ── Main form ──────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen flex">
-      {/* LEFT: Branding panel (hidden on mobile) */}
+      {/* LEFT: Branding panel */}
       <div
         className="hidden lg:flex flex-col justify-between w-[45%] p-12
                    bg-[var(--color-primary)] text-white"
@@ -194,12 +208,10 @@ export default function LoginPage() {
       {/* RIGHT: Form panel */}
       <div className="flex-1 flex items-center justify-center p-6 bg-[var(--color-background)]">
         <div className="w-full max-w-sm space-y-6">
-          {/* Mobile logo */}
           <div className="lg:hidden text-xl font-bold text-[var(--color-primary)]">
             DocChat
           </div>
 
-          {/* Mode heading */}
           <div>
             <h2 className="text-2xl font-semibold text-[var(--color-foreground)]">
               {mode === "signup" ? "Create account" : "Sign in"}
@@ -221,18 +233,17 @@ export default function LoginPage() {
             </p>
           </div>
 
-          {/* Global error */}
           {error && (
             <div
               role="alert"
               className="p-3 rounded-[var(--radius-md)] bg-[var(--color-destructive-subtle)]
-                                         text-[var(--color-destructive)] text-sm"
+                         text-[var(--color-destructive)] text-sm"
             >
               {error}
             </div>
           )}
 
-          {/* Magic link toggle */}
+          {/* Magic link / Password toggle */}
           <div className="flex gap-2">
             {(["signin", "magic"] as const).map((m) => (
               <button
@@ -253,7 +264,6 @@ export default function LoginPage() {
             ))}
           </div>
 
-          {/* Form */}
           <form
             onSubmit={mode === "magic" ? handleMagicLink : handleEmailAuth}
             className="space-y-4"
@@ -295,7 +305,7 @@ export default function LoginPage() {
               )}
             </div>
 
-            {/* Password (hidden for magic link) */}
+            {/* Password */}
             {mode !== "magic" && (
               <div className="space-y-1">
                 <label
@@ -354,7 +364,6 @@ export default function LoginPage() {
               </div>
             )}
 
-            {/* Submit */}
             <button
               type="submit"
               disabled={busy}
