@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "buildCommand": "npx turbo run build --filter=@docchat/web",
+  "buildCommand": "npm run build",
   "installCommand": "npm install --legacy-peer-deps",
   "framework": "nextjs",
   "outputDirectory": "apps/web/.next"

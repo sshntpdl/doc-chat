@@ -9,11 +9,14 @@
     "./middleware": "./src/middleware.ts"
   },
   "scripts": {
-    "build": "tsc --noEmit",
-    "type-check": "tsc --noEmit"
+    "build": "npx tsc --noEmit",
+    "type-check": "npx tsc --noEmit"
   },
   "dependencies": {
     "@supabase/ssr": "^0.3.0",
     "@supabase/supabase-js": "^2.43.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
   }
 }
