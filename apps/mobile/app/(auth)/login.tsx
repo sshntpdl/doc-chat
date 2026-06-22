@@ -1,15 +1,4 @@
-// FILE: /apps/mobile/app/auth/login.tsx
-//
-// Mobile login screen.
-// KEY MOBILE UX DECISIONS:
-//   - KeyboardAvoidingView keeps the form above the keyboard
-//   - ScrollView allows content to scroll on small phones
-//   - All touch targets are min 44×44pt (WCAG mobile guideline)
-//   - Platform-specific keyboard types (email-address, default)
-//   - returnKeyType chains fields: email → password → submit
-//   - Magic link flow same as web: submit → "check inbox" state
-
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback, memo } from "react";
 import {
   View,
   Text,
@@ -20,18 +9,88 @@ import {
   Platform,
   ActivityIndicator,
   StyleSheet,
+  type AccessibilityRole,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuthStore } from "@docchat/stores";
 import { supabase } from "../../supabase";
 
-type Mode = "signin" | "signup" | "magic" | "magic-sent";
+// ─── TYPES ───────────────────────────────────────────────────────────────────
 
-export default function LoginScreen() {
+type LoginMode = "signin" | "signup" | "magic" | "magic-sent";
+
+// ─── CONSTANTS ───────────────────────────────────────────────────────────────
+
+const RESEND_COUNTDOWN_SECONDS = 30;
+const BUTTON_ROLE: AccessibilityRole = "button";
+const TAB_ROLE: AccessibilityRole = "tab";
+const ALERT_ROLE: AccessibilityRole = "alert";
+const IOS_KAV_BEHAVIOR = "padding" as const;
+const ANDROID_KAV_BEHAVIOR = "height" as const;
+
+// ─── MAGIC-SENT SUB-SCREEN ───────────────────────────────────────────────────
+
+interface MagicSentViewProps {
+  readonly email: string;
+  readonly countdown: number;
+  readonly isLoading: boolean;
+  readonly onResend: () => void;
+  readonly onBack: () => void;
+}
+
+const MagicSentView = memo(function MagicSentView({
+  email,
+  countdown,
+  isLoading,
+  onResend,
+  onBack,
+}: MagicSentViewProps): React.JSX.Element {
+  const resendDisabled = countdown > 0 || isLoading;
+
+  return (
+    <SafeAreaView style={[s.container, s.center]}>
+      <Text style={s.bigEmoji}>✉️</Text>
+
+      <Text style={s.heading}>Check your inbox</Text>
+
+      <Text style={s.sub}>
+        We sent a magic link to{"\n"}
+        <Text style={s.emailHighlight}>{email}</Text>
+      </Text>
+
+      <TouchableOpacity
+        onPress={onResend}
+        disabled={resendDisabled}
+        style={[s.outlineBtn, resendDisabled && s.disabled]}
+        accessibilityRole={BUTTON_ROLE}
+        accessibilityLabel={
+          countdown > 0 ? `Resend in ${countdown} seconds` : "Resend email"
+        }
+      >
+        <Text style={s.outlineBtnText}>
+          {countdown > 0 ? `Resend in ${countdown}s` : "Resend email"}
+        </Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        onPress={onBack}
+        style={s.backLink}
+        accessibilityRole={BUTTON_ROLE}
+        accessibilityLabel="Back to sign in"
+      >
+        <Text style={s.link}>← Back to sign in</Text>
+      </TouchableOpacity>
+    </SafeAreaView>
+  );
+});
+
+// ─── MAIN LOGIN SCREEN ────────────────────────────────────────────────────────
+
+export default function LoginScreen(): React.JSX.Element {
   const { signInWithEmail, signUpWithEmail, signInWithMagicLink, isLoading } =
     useAuthStore();
 
-  const [mode, setMode] = useState<Mode>("signin");
+  const [mode, setMode] = useState<LoginMode>("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -47,25 +106,26 @@ export default function LoginScreen() {
     return () => clearTimeout(t);
   }, [countdown]);
 
-  async function handleSubmit() {
+  const handleSubmit = useCallback(async (): Promise<void> => {
     setError(null);
-    if (!email.trim()) {
+
+    if (email.trim() === "") {
       setError("Email is required");
       return;
     }
 
     if (mode === "magic") {
       const err = await signInWithMagicLink(email.trim(), supabase);
-      if (err) {
+      if (err != null) {
         setError(err.message);
         return;
       }
       setMode("magic-sent");
-      setCountdown(30);
+      setCountdown(RESEND_COUNTDOWN_SECONDS);
       return;
     }
 
-    if (!password) {
+    if (password === "") {
       setError("Password is required");
       return;
     }
@@ -75,58 +135,76 @@ export default function LoginScreen() {
         ? await signUpWithEmail(email.trim(), password, supabase)
         : await signInWithEmail(email.trim(), password, supabase);
 
-    if (err) {
+    if (err != null) {
       setError(err.message);
     } else if (mode === "signup") {
-      setMode("magic-sent"); // verify email
+      setMode("magic-sent");
     }
     // Successful sign-in → root layout redirects to (app)
-  }
+  }, [
+    email,
+    mode,
+    password,
+    signInWithEmail,
+    signUpWithEmail,
+    signInWithMagicLink,
+  ]);
 
-  // ── Magic sent state ───────────────────────────────────────────────────────
+  const handleResend = useCallback(async (): Promise<void> => {
+    if (countdown > 0 || isLoading) return;
+    await signInWithMagicLink(email, supabase);
+    setCountdown(RESEND_COUNTDOWN_SECONDS);
+  }, [countdown, isLoading, email, signInWithMagicLink]);
+
+  const handleModeToggle = useCallback((next: "signin" | "signup") => {
+    setMode(next);
+    setError(null);
+  }, []);
+
+  const handleMagicToggle = useCallback(() => {
+    setMode((prev) => (prev === "magic" ? "signin" : "magic"));
+  }, []);
+
+  const handleShowPassword = useCallback(() => {
+    setShowPassword((v) => !v);
+  }, []);
+
+  const handleEmailSubmit = useCallback(() => {
+    if (mode !== "magic") {
+      passwordRef.current?.focus();
+    } else {
+      void handleSubmit();
+    }
+  }, [mode, handleSubmit]);
+
+  const handleBackToSignIn = useCallback(() => {
+    setMode("signin");
+  }, []);
+
+  // ── Magic sent state ────────────────────────────────────────────────────────
   if (mode === "magic-sent") {
     return (
-      <SafeAreaView style={[s.container, s.center]}>
-        <Text style={s.bigEmoji}>✉️</Text>
-        <Text style={s.heading}>Check your inbox</Text>
-        <Text style={s.sub}>
-          We sent a magic link to{"\n"}
-          <Text style={s.emailHighlight}>{email}</Text>
-        </Text>
-        <TouchableOpacity
-          onPress={async () => {
-            if (countdown > 0) return;
-            await signInWithMagicLink(email);
-            setCountdown(30);
-          }}
-          disabled={countdown > 0 || isLoading}
-          style={[s.outlineBtn, (countdown > 0 || isLoading) && s.disabled]}
-          accessibilityLabel={
-            countdown > 0 ? `Resend in ${countdown} seconds` : "Resend email"
-          }
-        >
-          <Text style={s.outlineBtnText}>
-            {countdown > 0 ? `Resend in ${countdown}s` : "Resend email"}
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          onPress={() => setMode("signin")}
-          style={{ marginTop: 16 }}
-          accessibilityLabel="Back to sign in"
-        >
-          <Text style={s.link}>← Back to sign in</Text>
-        </TouchableOpacity>
-      </SafeAreaView>
+      <MagicSentView
+        email={email}
+        countdown={countdown}
+        isLoading={isLoading}
+        onResend={() => void handleResend()}
+        onBack={handleBackToSignIn}
+      />
     );
   }
 
-  // ── Main form ──────────────────────────────────────────────────────────────
+  // ── Main form ───────────────────────────────────────────────────────────────
+  const kvBehavior =
+    Platform.OS === "ios" ? IOS_KAV_BEHAVIOR : ANDROID_KAV_BEHAVIOR;
+  const kvOffset = Platform.OS === "ios" ? 0 : 20;
+
   return (
     <SafeAreaView style={s.container}>
       <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        style={{ flex: 1 }}
-        keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 20}
+        behavior={kvBehavior}
+        style={s.flex}
+        keyboardVerticalOffset={kvOffset}
       >
         <ScrollView
           contentContainerStyle={s.scroll}
@@ -144,12 +222,9 @@ export default function LoginScreen() {
             {(["signin", "signup"] as const).map((m) => (
               <TouchableOpacity
                 key={m}
-                onPress={() => {
-                  setMode(m);
-                  setError(null);
-                }}
+                onPress={() => handleModeToggle(m)}
                 style={[s.modeBtn, mode === m && s.modeBtnActive]}
-                accessibilityRole="tab"
+                accessibilityRole={TAB_ROLE}
                 accessibilityState={{ selected: mode === m }}
               >
                 <Text
@@ -162,16 +237,22 @@ export default function LoginScreen() {
           </View>
 
           {/* Error banner */}
-          {error && (
-            <View style={s.errorBanner} accessibilityRole="alert">
+          {error != null ? (
+            <View style={s.errorBanner} accessibilityRole={ALERT_ROLE}>
               <Text style={s.errorText}>{error}</Text>
             </View>
-          )}
+          ) : null}
 
           {/* Magic link toggle */}
           <TouchableOpacity
-            onPress={() => setMode(mode === "magic" ? "signin" : "magic")}
+            onPress={handleMagicToggle}
             style={s.magicToggle}
+            accessibilityRole={BUTTON_ROLE}
+            accessibilityLabel={
+              mode === "magic"
+                ? "Switch to password login"
+                : "Switch to magic link login"
+            }
           >
             <Text style={s.link}>
               {mode === "magic"
@@ -194,22 +275,19 @@ export default function LoginScreen() {
               autoCorrect={false}
               autoComplete="email"
               returnKeyType={mode === "magic" ? "send" : "next"}
-              onSubmitEditing={() => {
-                if (mode !== "magic") passwordRef.current?.focus();
-                else handleSubmit();
-              }}
+              onSubmitEditing={handleEmailSubmit}
               accessibilityLabel="Email address"
             />
           </View>
 
           {/* Password field (hidden for magic link) */}
-          {mode !== "magic" && (
+          {mode !== "magic" ? (
             <View style={s.fieldGroup}>
               <Text style={s.label}>Password</Text>
               <View style={s.passwordRow}>
                 <TextInput
                   ref={passwordRef}
-                  style={[s.input, { flex: 1 }]}
+                  style={[s.input, s.flex]}
                   value={password}
                   onChangeText={setPassword}
                   placeholder="••••••••"
@@ -219,12 +297,13 @@ export default function LoginScreen() {
                     mode === "signup" ? "new-password" : "current-password"
                   }
                   returnKeyType="done"
-                  onSubmitEditing={handleSubmit}
+                  onSubmitEditing={() => void handleSubmit()}
                   accessibilityLabel="Password"
                 />
                 <TouchableOpacity
-                  onPress={() => setShowPassword((v) => !v)}
+                  onPress={handleShowPassword}
                   style={s.showHideBtn}
+                  accessibilityRole={BUTTON_ROLE}
                   accessibilityLabel={
                     showPassword ? "Hide password" : "Show password"
                   }
@@ -236,14 +315,14 @@ export default function LoginScreen() {
                 </TouchableOpacity>
               </View>
             </View>
-          )}
+          ) : null}
 
           {/* Submit button */}
           <TouchableOpacity
-            onPress={handleSubmit}
+            onPress={() => void handleSubmit()}
             disabled={isLoading}
             style={[s.primaryBtn, isLoading && s.disabled]}
-            accessibilityRole="button"
+            accessibilityRole={BUTTON_ROLE}
             accessibilityLabel={
               mode === "magic"
                 ? "Send magic link"
@@ -271,10 +350,9 @@ export default function LoginScreen() {
 }
 
 // ─── STYLES ──────────────────────────────────────────────────────────────────
-// Using StyleSheet.create instead of NativeWind for the auth screen because
-// the design heavily uses dynamic color values from our design token system.
 
 const s = StyleSheet.create({
+  flex: { flex: 1 },
   container: { flex: 1, backgroundColor: "#0F172A" },
   center: { alignItems: "center", justifyContent: "center", padding: 24 },
   scroll: { flexGrow: 1, padding: 24, paddingTop: 40 },
@@ -317,7 +395,12 @@ const s = StyleSheet.create({
   link: { color: "#818CF8", fontSize: 14 },
 
   fieldGroup: { marginBottom: 16 },
-  label: { color: "#F1F5F9", fontSize: 14, fontWeight: "600", marginBottom: 6 },
+  label: {
+    color: "#F1F5F9",
+    fontSize: 14,
+    fontWeight: "600",
+    marginBottom: 6,
+  },
   input: {
     backgroundColor: "#1E293B",
     borderWidth: 1,
@@ -327,7 +410,7 @@ const s = StyleSheet.create({
     paddingVertical: 13,
     color: "#F1F5F9",
     fontSize: 15,
-    minHeight: 48, // accessibility: min touch target
+    minHeight: 48,
   },
   passwordRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   showHideBtn: {
@@ -344,7 +427,7 @@ const s = StyleSheet.create({
     paddingVertical: 15,
     alignItems: "center",
     marginTop: 8,
-    minHeight: 52, // accessibility
+    minHeight: 52,
   },
   primaryBtnText: { color: "#FFFFFF", fontSize: 16, fontWeight: "700" },
 
@@ -357,6 +440,7 @@ const s = StyleSheet.create({
     alignItems: "center",
     minHeight: 52,
     marginTop: 8,
+    width: "100%",
   },
   outlineBtnText: { color: "#F1F5F9", fontSize: 15, fontWeight: "600" },
 
@@ -378,4 +462,5 @@ const s = StyleSheet.create({
     marginBottom: 24,
   },
   emailHighlight: { color: "#F1F5F9", fontWeight: "600" },
+  backLink: { marginTop: 16 },
 });

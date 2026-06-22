@@ -1,7 +1,3 @@
-// FILE: apps/web/app/dashboard/loading.tsx
-// Shown while dashboard/page.tsx (Server Component) is fetching documents.
-// Mirrors the exact layout of the real dashboard so there's no layout shift.
-
 export default function DashboardLoading() {
   return (
     <div className="min-h-screen bg-[var(--color-background)]">

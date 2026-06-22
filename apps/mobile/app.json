@@ -13,7 +13,9 @@
       "resizeMode": "contain",
       "backgroundColor": "#0F172A"
     },
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
       "backgroundColor": "#0F172A",
@@ -30,7 +32,9 @@
         "backgroundColor": "#4F46E5"
       },
       "package": "com.docchat.app",
-      "permissions": ["READ_EXTERNAL_STORAGE"]
+      "permissions": [
+        "READ_EXTERNAL_STORAGE"
+      ]
     },
     "plugins": [
       "expo-router",
@@ -46,6 +50,12 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "3a21722f-d911-4e3b-abff-2056d91c63c2"
+      }
     }
   }
 }

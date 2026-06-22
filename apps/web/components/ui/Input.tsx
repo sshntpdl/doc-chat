@@ -4,7 +4,11 @@
 
 import { forwardRef, type InputHTMLAttributes } from "react";
 
-interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
+// Omit the native broken style prop and redefine it cleanly as any
+interface InputProps extends Omit<
+  InputHTMLAttributes<HTMLInputElement>,
+  "style"
+> {
   label?: string;
   error?: string;
   helperText?: string;
@@ -12,6 +16,7 @@ interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   rightIcon?: React.ReactNode;
   /** Full-width by default */
   fullWidth?: boolean;
+  style?: any;
 }
 
 export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
@@ -24,6 +29,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
     fullWidth = true,
     className = "",
     id,
+    style,
     ...rest
   },
   ref,
@@ -57,6 +63,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
         <input
           ref={ref}
           id={inputId}
+          style={style}
           aria-describedby={
             error
               ? `${inputId}-error`

@@ -1,47 +1,51 @@
-// FILE: /apps/web/app/api/chat/sessions/route.ts
-//
-// GET /api/chat/sessions?documentId=<uuid>&cursor=<iso-timestamp>&limit=<n>
-//
-// Returns a page of chat sessions belonging to the authenticated user,
-// filtered by documentId, ordered newest-first (created_at DESC).
-//
-// Pagination is cursor-based using `created_at` as the cursor:
-//   - First page: omit `cursor`
-//   - Next pages: pass the `nextCursor` value returned by the previous page
-//
-// This avoids the "offset drift" problem (rows shift when new sessions are
-// created between pages) that plagues OFFSET-based pagination.
-//
-// Response shape:
-// {
-//   sessions: SessionSummary[],   // title + metadata only, no messages
-//   nextCursor: string | null,    // ISO timestamp for the next page; null = end
-//   hasMore: boolean,
-// }
-
 import { NextRequest } from "next/server";
 import { z } from "zod";
 import { getAuthenticatedUser } from "../../_lib/auth";
 import { successResponse, errorResponse } from "../../_lib/response";
 import { AppError, ErrorCode } from "@docchat/types";
+import type { ChatSession } from "@docchat/types";
+
+// ─── RAW DB ROW TYPE ──────────────────────────────────────────────────────────
+
+interface RawSessionRow {
+  id: string;
+  user_id: string;
+  document_id: string | null;
+  title: string;
+  created_at: string;
+}
 
 // ─── VALIDATION ───────────────────────────────────────────────────────────────
 
 const QuerySchema = z.object({
   documentId: z.string().uuid({ message: "documentId must be a valid UUID" }),
-  // ISO-8601 timestamp — the created_at of the last item from the previous page
   cursor: z.string().datetime({ offset: true }).optional(),
-  // How many sessions to return per page. Capped at 50 server-side.
   limit: z.coerce.number().int().min(1).max(50).default(15),
 });
 
-// ─── HANDLER ──────────────────────────────────────────────────────────────────
+// ─── MAPPER ───────────────────────────────────────────────────────────────────
 
-export async function GET(request: NextRequest) {
+/**
+ * Map a raw Supabase session row to the ChatSession domain type.
+ */
+function mapSessionStub(row: RawSessionRow): ChatSession {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    documentId: row.document_id,
+    title: row.title,
+    messages: [],
+    createdAt: row.created_at,
+    isLoaded: false,
+  };
+}
+
+// ─── ROUTE HANDLER ────────────────────────────────────────────────────────────
+
+export async function GET(request: NextRequest): Promise<Response> {
   try {
     const { user, supabase } = await getAuthenticatedUser(request);
 
-    // Parse + validate query params
     const raw = Object.fromEntries(request.nextUrl.searchParams.entries());
     const parsed = QuerySchema.safeParse(raw);
 
@@ -56,22 +60,23 @@ export async function GET(request: NextRequest) {
 
     const { documentId, cursor, limit } = parsed.data;
 
-    // We fetch limit + 1 rows so we can detect whether a next page exists
-    // without a separate COUNT query.
+    // 1. Start with the base query and immediate filters
     let query = supabase
       .from("chat_sessions")
       .select("id, user_id, document_id, title, created_at")
       .eq("user_id", user.id)
-      .eq("document_id", documentId)
-      .order("created_at", { ascending: false })
-      .limit(limit + 1);
+      .eq("document_id", documentId);
 
-    // Cursor: return only sessions older than the cursor timestamp
+    // 2. Conditionally apply the cursor filter while it's still a FilterBuilder
     if (cursor) {
       query = query.lt("created_at", cursor);
     }
 
-    const { data, error } = await query;
+    // 3. Apply sorting, limits, and type casting at the very end
+    const { data, error } = await query
+      .order("created_at", { ascending: false })
+      .limit(limit + 1)
+      .returns<RawSessionRow[]>();
 
     if (error) {
       throw new AppError(
@@ -84,30 +89,18 @@ export async function GET(request: NextRequest) {
 
     const rows = data ?? [];
     const hasMore = rows.length > limit;
-    const sessions = hasMore ? rows.slice(0, limit) : rows;
+    // Trim the extra row we fetched for the hasMore check
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
-    // The next cursor is the created_at of the last item in this page.
-    // The next request will use lt("created_at", nextCursor) to continue.
-    const nextCursor =
-      hasMore && sessions.length > 0
-        ? sessions[sessions.length - 1].created_at
+    // The next cursor is the created_at of the last row in this page.
+    const nextCursor: string | null =
+      hasMore && pageRows.length > 0
+        ? pageRows[pageRows.length - 1].created_at
         : null;
 
-    return successResponse({
-      sessions: sessions.map((s: any) => ({
-        id: s.id,
-        userId: s.user_id,
-        documentId: s.document_id,
-        title: s.title,
-        createdAt: s.created_at,
-        // Sessions fetched from this endpoint are stubs — no messages loaded yet.
-        // The chatStore will hydrate messages on demand via loadHistory().
-        messages: [],
-        isLoaded: false,
-      })),
-      nextCursor,
-      hasMore,
-    });
+    const sessions: ChatSession[] = pageRows.map(mapSessionStub);
+
+    return successResponse({ sessions, nextCursor, hasMore });
   } catch (err) {
     return errorResponse(err);
   }

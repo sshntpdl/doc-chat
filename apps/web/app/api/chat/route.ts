@@ -1,21 +1,4 @@
-// FILE: /apps/web/app/api/chat/route.ts
-//
-// POST /api/chat — Full RAG pipeline with Server-Sent Events streaming.
-//
-// PIPELINE:
-//   1. Validate auth + rate limit
-//   2. Parse and validate request body
-//   3. Load or create chat session in DB
-//   4. Embed the user's question (HuggingFace)
-//   5. Retrieve top-K chunks (Supabase pgvector)
-//   6. Resolve document names once (shared by prompt + citations)
-//   7. Build message array manually (NO ChatPromptTemplate — see Step 3)
-//   8. Stream Groq response token-by-token as SSE events
-//   9. After stream ends, emit 'sources' event with citations
-//   10. Persist the completed message to DB
-
 import { NextRequest } from "next/server";
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { SystemMessage, HumanMessage } from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
 import { z } from "zod";
@@ -31,12 +14,27 @@ import {
   buildSourceCitations,
   getGroqClient,
 } from "../_lib/langchain";
+import type { RetrievedChunk } from "../_lib/langchain";
 import { AppError, ErrorCode } from "@docchat/types";
-import type { SSEEvent } from "@docchat/types";
+import type { SSEEvent, SourceCitation } from "@docchat/types";
+import type { User, SupabaseClient } from "@supabase/supabase-js";
 
-type SupabaseClientAny = SupabaseClient<any, "public", any>;
+// ─── RAW DB ROW TYPES ─────────────────────────────────────────────────────────
 
-// ─── VALIDATION SCHEMA ────────────────────────────────────────────────────────
+interface RawChatMessageRow {
+  role: string;
+  content: string;
+}
+
+interface RawSessionRow {
+  id: string;
+}
+
+interface RawAssistantMsgRow {
+  id: string;
+}
+
+// ─── VALIDATION ───────────────────────────────────────────────────────────────
 
 const ChatRequestSchema = z.object({
   sessionId: z.string().uuid().optional().nullable(),
@@ -52,135 +50,149 @@ const ChatRequestSchema = z.object({
   documentId: z.string().uuid().optional().nullable(),
 });
 
-// ─── HANDLER ──────────────────────────────────────────────────────────────────
+type ParsedChatRequest = z.infer<typeof ChatRequestSchema>;
 
-export async function POST(request: NextRequest) {
-  try {
-    const { user, supabase } = await getAuthenticatedUser(request);
+// ─── INTERNAL TYPES ───────────────────────────────────────────────────────────
 
-    rateLimiter(user.id, "chat", 30, 60 * 1000);
-
-    const body = await request.json();
-    const parsed = ChatRequestSchema.safeParse(body);
-
-    if (!parsed.success) {
-      throw new AppError(
-        ErrorCode.INVALID_INPUT,
-        parsed.error.errors[0]?.message ?? "Invalid request",
-        400,
-        false,
-      );
-    }
-
-    const { content, documentId, sessionId: incomingSessionId } = parsed.data;
-
-    let sessionId = incomingSessionId;
-    let existingMessages: Array<{ role: string; content: string }> = [];
-
-    if (sessionId) {
-      const { data: msgs } = await supabase
-        .from("chat_messages")
-        .select("role, content")
-        .eq("session_id", sessionId)
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: true })
-        .limit(20);
-
-      existingMessages = msgs ?? [];
-    } else {
-      const title = content.slice(0, 40) + (content.length > 40 ? "…" : "");
-      const { data: session, error } = await supabase
-        .from("chat_sessions")
-        .insert({
-          user_id: user.id,
-          document_id: documentId ?? null,
-          title,
-        })
-        .select("id")
-        .single();
-
-      if (error || !session) {
-        throw new AppError(
-          ErrorCode.NETWORK_ERROR,
-          "Failed to create session",
-          500,
-          true,
-        );
-      }
-      sessionId = session.id;
-    }
-
-    await supabase.from("chat_messages").insert({
-      session_id: sessionId,
-      user_id: user.id,
-      role: "user",
-      content,
-    });
-
-    const { data: assistantMsg } = await supabase
-      .from("chat_messages")
-      .insert({
-        session_id: sessionId,
-        user_id: user.id,
-        role: "assistant",
-        content: "",
-      })
-      .select("id")
-      .single();
-
-    const assistantMsgId = assistantMsg?.id ?? crypto.randomUUID();
-    const startEvent: SSEEvent = {
-      type: "start",
-      messageId: assistantMsgId,
-      sessionId: sessionId!,
-    };
-
-    return streamResponse(
-      generateStream({
-        user,
-        supabase,
-        content,
-        documentId: documentId ?? null,
-        sessionId: sessionId!,
-        existingMessages,
-        assistantMsgId,
-        startEvent,
-      }),
-    );
-  } catch (err) {
-    return errorResponse(err);
-  }
+interface NormalisedChatMessage {
+  role: string;
+  content: string;
 }
 
-// ─── STREAM GENERATOR ─────────────────────────────────────────────────────────
+interface SessionContext {
+  sessionId: string;
+  existingMessages: NormalisedChatMessage[];
+}
 
-async function* generateStream({
-  user,
-  supabase,
-  content,
-  documentId,
-  sessionId,
-  existingMessages,
-  assistantMsgId,
-  startEvent,
-}: {
-  user: { id: string };
-  supabase: SupabaseClientAny;
+interface StreamContext {
+  user: User;
+  supabase: SupabaseClient;
   content: string;
   documentId: string | null;
   sessionId: string;
-  existingMessages: Array<{ role: string; content: string }>;
+  existingMessages: NormalisedChatMessage[];
   assistantMsgId: string;
   startEvent: SSEEvent;
-}): AsyncGenerator<SSEEvent> {
-  yield startEvent;
+}
 
-  // ── Step 1: Embed ────────────────────────────────────────────────────
-  let queryEmbedding: number[];
+// ─── SESSION HELPERS ──────────────────────────────────────────────────────────
+
+/**
+ * Load an existing session's message history from the DB.
+ * Returns at most 20 rows (the chat history builder trims further).
+ */
+async function loadExistingSession(
+  supabase: SupabaseClient,
+  sessionId: string,
+  userId: string,
+): Promise<NormalisedChatMessage[]> {
+  const { data } = await supabase
+    .from("chat_messages")
+    .select("role, content")
+    .eq("session_id", sessionId)
+    .eq("user_id", userId)
+    .order("created_at", { ascending: true })
+    .limit(20)
+    .returns<RawChatMessageRow[]>();
+
+  return (data ?? []).map((row) => ({
+    role: row.role,
+    content: row.content,
+  }));
+}
+
+/**
+ * Create a new chat session in the DB and return its generated ID.
+ */
+async function createSession(
+  supabase: SupabaseClient,
+  userId: string,
+  documentId: string | null,
+  firstMessage: string,
+): Promise<string> {
+  const title =
+    firstMessage.slice(0, 40) + (firstMessage.length > 40 ? "…" : "");
+
+  const { data, error } = await supabase
+    .from("chat_sessions")
+    .insert({ user_id: userId, document_id: documentId, title })
+    .select("id")
+    .single<RawSessionRow>();
+
+  if (error || !data) {
+    throw new AppError(
+      ErrorCode.NETWORK_ERROR,
+      "Failed to create session",
+      500,
+      true,
+    );
+  }
+
+  return data.id;
+}
+
+/**
+ * Resolve (or create) a session and return the session ID together with
+ * the existing message history that will seed the chat context.
+ */
+async function resolveSession(
+  supabase: SupabaseClient,
+  userId: string,
+  documentId: string | null,
+  content: string,
+  incomingSessionId: string | null | undefined,
+): Promise<SessionContext> {
+  if (incomingSessionId) {
+    const existingMessages = await loadExistingSession(
+      supabase,
+      incomingSessionId,
+      userId,
+    );
+    return { sessionId: incomingSessionId, existingMessages };
+  }
+
+  const sessionId = await createSession(supabase, userId, documentId, content);
+  return { sessionId, existingMessages: [] };
+}
+
+/**
+ * Write the user's message and a placeholder assistant message to the DB.
+ */
+async function persistInitialMessages(
+  supabase: SupabaseClient,
+  sessionId: string,
+  userId: string,
+  content: string,
+): Promise<string> {
+  await supabase.from("chat_messages").insert({
+    session_id: sessionId,
+    user_id: userId,
+    role: "user",
+    content,
+  });
+
+  const { data } = await supabase
+    .from("chat_messages")
+    .insert({
+      session_id: sessionId,
+      user_id: userId,
+      role: "assistant",
+      content: "",
+    })
+    .select("id")
+    .single<RawAssistantMsgRow>();
+
+  // Fall back to a random UUID if the insert somehow returns no row
+  return data?.id ?? crypto.randomUUID();
+}
+
+// ─── RAG PIPELINE HELPERS ─────────────────────────────────────────────────────
+
+/** Embed the query with retry semantics (see langchain.ts). */
+async function embedUserQuery(content: string): Promise<number[]> {
   try {
-    queryEmbedding = await embedQuery(content);
+    return await embedQuery(content);
   } catch (err) {
-    console.error("[generateStream] embedQuery failed:", err);
     throw new AppError(
       ErrorCode.EMBEDDING_FAILED,
       `Embedding step failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -188,19 +200,24 @@ async function* generateStream({
       true,
     );
   }
+}
 
-  // ── Step 2: Retrieve chunks ──────────────────────────────────────────
-  let chunks: Awaited<ReturnType<typeof retrieveChunks>>;
+/** Retrieve the top-K semantically similar chunks from pgvector. */
+async function retrieveRelevantChunks(
+  supabase: SupabaseClient,
+  userId: string,
+  documentId: string | null,
+  queryEmbedding: number[],
+): Promise<RetrievedChunk[]> {
   try {
-    chunks = await retrieveChunks(
+    return await retrieveChunks(
       queryEmbedding,
-      supabase as any,
-      user.id,
+      supabase,
+      userId,
       documentId,
       4,
     );
   } catch (err) {
-    console.error("[generateStream] retrieveChunks failed:", err);
     throw new AppError(
       ErrorCode.EMBEDDING_FAILED,
       `Vector search failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -208,45 +225,67 @@ async function* generateStream({
       true,
     );
   }
+}
 
-  // ── Step 2.5: Resolve document names ────────────────────────────────
+/** Build the LangChain message array without using ChatPromptTemplate. */
+function buildMessageArray(
+  chunks: RetrievedChunk[],
+  docNameMap: Record<string, string>,
+  existingMessages: NormalisedChatMessage[],
+  content: string,
+): BaseMessage[] {
+  const systemPrompt = buildSystemPrompt(chunks, docNameMap);
+  const chatHistory = buildChatHistory(existingMessages);
+
+  return [
+    new SystemMessage(systemPrompt),
+    ...chatHistory,
+    new HumanMessage(content),
+  ];
+}
+
+// ─── STREAM GENERATOR ─────────────────────────────────────────────────────────
+
+/**
+ * Core async generator driving the SSE stream.
+ */
+async function* generateStream(ctx: StreamContext): AsyncGenerator<SSEEvent> {
+  yield ctx.startEvent;
+
+  // ── 1. Embed ──────────────────────────────────────────────────────────
+  const queryEmbedding = await embedUserQuery(ctx.content);
+
+  // ── 2. Retrieve chunks ────────────────────────────────────────────────
+  const chunks = await retrieveRelevantChunks(
+    ctx.supabase,
+    ctx.user.id,
+    ctx.documentId,
+    queryEmbedding,
+  );
+
+  // ── 3. Resolve document names (shared by prompt + citations) ──────────
   let docNameMap: Record<string, string>;
   try {
-    docNameMap = await fetchDocumentNameMap(chunks, supabase as any);
+    docNameMap = await fetchDocumentNameMap(chunks, ctx.supabase);
   } catch (err) {
+    // Non-fatal — fall back to UUID labels rather than aborting the stream
     console.error("[generateStream] fetchDocumentNameMap failed:", err);
     docNameMap = {};
   }
 
-  // ── Step 3: Build message array — NO ChatPromptTemplate ─────────────
-  //
-  // ROOT CAUSE OF ALL PREVIOUS ERRORS:
-  // ChatPromptTemplate.fromMessages() runs an f-string parser over every
-  // string it receives, looking for {variable} placeholders. Document chunks
-  // from real files (JSON, TypeScript, code, etc.) contain curly braces, so
-  // LangChain finds e.g. `{'role':'user','content':'Hello!'}` inside the
-  // system prompt text and throws:
-  //   "Missing value for input variable `'role':'user','content':'Hello!'`"
-  //
-  // SOLUTION: skip ChatPromptTemplate entirely. Build a plain BaseMessage[]
-  // array and pass it directly to groq.stream(). BaseMessage content is
-  // NEVER parsed for template variables — it's always treated as literal text.
-  // This is the correct pattern for RAG pipelines where context is dynamic.
-  const systemPrompt = buildSystemPrompt(chunks, docNameMap);
-  const chatHistory = buildChatHistory(existingMessages);
+  // ── 4. Build BaseMessage[] (no ChatPromptTemplate) ────────────────────
+  const messages = buildMessageArray(
+    chunks,
+    docNameMap,
+    ctx.existingMessages,
+    ctx.content,
+  );
 
-  const messages: BaseMessage[] = [
-    new SystemMessage(systemPrompt), // literal — never f-string parsed
-    ...chatHistory, // already BaseMessage instances
-    new HumanMessage(content), // literal — never f-string parsed
-  ];
-
-  // ── Step 4: Init Groq ────────────────────────────────────────────────
+  // ── 5. Initialise Groq client ─────────────────────────────────────────
   let groq: ReturnType<typeof getGroqClient>;
   try {
     groq = getGroqClient();
   } catch (err) {
-    console.error("[generateStream] getGroqClient failed:", err);
     throw new AppError(
       ErrorCode.GROQ_UNAVAILABLE,
       `Groq client init failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -255,17 +294,11 @@ async function* generateStream({
     );
   }
 
-  // ── Step 5: Stream tokens ────────────────────────────────────────────
-  let fullContent = "";
-  let totalTokens = 0;
-
+  // ── 6. Stream tokens ──────────────────────────────────────────────────
   let stream: Awaited<ReturnType<typeof groq.stream>>;
   try {
-    // Call groq.stream() directly with the message array — no chain, no pipe,
-    // no template parsing. Clean, direct, and immune to f-string issues.
     stream = await groq.stream(messages);
   } catch (err) {
-    console.error("[generateStream] groq.stream() failed:", err);
     throw new AppError(
       ErrorCode.GROQ_UNAVAILABLE,
       `LLM stream failed to start: ${err instanceof Error ? err.message : String(err)}`,
@@ -273,6 +306,9 @@ async function* generateStream({
       true,
     );
   }
+
+  let fullContent = "";
+  let totalTokens = 0;
 
   try {
     for await (const chunk of stream) {
@@ -285,7 +321,6 @@ async function* generateStream({
       yield { type: "token", content: token };
     }
   } catch (err) {
-    console.error("[generateStream] Token streaming interrupted:", err);
     throw new AppError(
       ErrorCode.STREAM_INTERRUPTED,
       `Stream interrupted: ${err instanceof Error ? err.message : String(err)}`,
@@ -294,24 +329,92 @@ async function* generateStream({
     );
   }
 
-  // ── Step 6: Emit sources ─────────────────────────────────────────────
-  const sources = buildSourceCitations(chunks, docNameMap);
+  // ── 7. Emit citations ─────────────────────────────────────────────────
+  const sources: SourceCitation[] = buildSourceCitations(chunks, docNameMap);
   yield { type: "sources", sources };
 
-  // ── Step 7: Persist completed message ───────────────────────────────
+  // ── 8. Persist completed assistant message ────────────────────────────
   try {
-    await supabase
+    await ctx.supabase
       .from("chat_messages")
       .update({
         content: fullContent,
         sources: sources.length > 0 ? sources : null,
       })
-      .eq("id", assistantMsgId);
+      .eq("id", ctx.assistantMsgId);
   } catch (err) {
     console.error("[generateStream] Failed to persist assistant message:", err);
-    // Non-fatal — user already received the streamed response
   }
 
-  // ── Step 8: Done ─────────────────────────────────────────────────────
-  yield { type: "done", messageId: assistantMsgId, totalTokens };
+  // ── 9. Done ───────────────────────────────────────────────────────────
+  yield { type: "done", messageId: ctx.assistantMsgId, totalTokens };
+}
+
+// ─── ROUTE HANDLER ────────────────────────────────────────────────────────────
+
+export async function POST(request: NextRequest): Promise<Response> {
+  try {
+    const { user, supabase } = await getAuthenticatedUser(request);
+
+    rateLimiter(user.id, "chat", 30, 60 * 1000);
+
+    // ── Validate body ────────────────────────────────────────────────────
+    const body: unknown = await request.json();
+    const parsed = ChatRequestSchema.safeParse(body);
+
+    if (!parsed.success) {
+      throw new AppError(
+        ErrorCode.INVALID_INPUT,
+        parsed.error.errors[0]?.message ?? "Invalid request",
+        400,
+        false,
+      );
+    }
+
+    const {
+      content,
+      documentId,
+      sessionId: incomingSessionId,
+    } = parsed.data as ParsedChatRequest;
+
+    // ── Resolve / create session ─────────────────────────────────────────
+    const { sessionId, existingMessages } = await resolveSession(
+      supabase,
+      user.id,
+      documentId ?? null,
+      content,
+      incomingSessionId,
+    );
+
+    // ── Persist user message + assistant placeholder ──────────────────────
+    const assistantMsgId = await persistInitialMessages(
+      supabase,
+      sessionId,
+      user.id,
+      content,
+    );
+
+    // ── Build start event ─────────────────────────────────────────────────
+    const startEvent: SSEEvent = {
+      type: "start",
+      messageId: assistantMsgId,
+      sessionId,
+    };
+
+    // ── Start SSE stream ──────────────────────────────────────────────────
+    return streamResponse(
+      generateStream({
+        user,
+        supabase,
+        content,
+        documentId: documentId ?? null,
+        sessionId,
+        existingMessages,
+        assistantMsgId,
+        startEvent,
+      }),
+    );
+  } catch (err) {
+    return errorResponse(err);
+  }
 }

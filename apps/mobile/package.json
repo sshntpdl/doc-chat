@@ -8,7 +8,8 @@
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "build:android": "eas build --platform android"
   },
   "dependencies": {
     "@docchat/stores": "*",

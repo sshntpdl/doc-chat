@@ -1,10 +1,27 @@
-// FILE: /apps/mobile/app/(app)/chat/_layout.tsx
-
-import { Stack } from "expo-router";
+import React from "react";
 import { Platform } from "react-native";
+import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 
-export default function ChatLayout() {
+// TYPES
+
+interface DocumentIdParams {
+  documentId?: string | string[];
+}
+
+// HELPERS
+
+function resolveDocumentId(params: DocumentIdParams): string {
+  if (typeof params.documentId === "string") return params.documentId;
+  if (Array.isArray(params.documentId) && params.documentId.length > 0) {
+    return params.documentId[0] ?? "chat";
+  }
+  return "chat";
+}
+
+// LAYOUT─
+
+export default function ChatLayout(): React.JSX.Element {
   return (
     <>
       <StatusBar style="light" backgroundColor="#0F172A" translucent={false} />
@@ -34,19 +51,7 @@ export default function ChatLayout() {
             animation: "slide_from_right",
             contentStyle: { backgroundColor: "#0F172A" },
           }}
-          // getId makes expo-router treat each unique documentId as a
-          // completely separate screen instance in the stack.
-          // Without this, pushing /chat/docA then /chat/docB then back
-          // to /chat/docA reuses the cached docA component — same useRef,
-          // same stale sessionId. With getId, each documentId gets its
-          // own entry in the stack history and its own fresh component.
-          getId={({ params }) =>
-            typeof params?.documentId === "string"
-              ? params.documentId
-              : Array.isArray(params?.documentId)
-                ? params.documentId[0]
-                : "chat"
-          }
+          getId={({ params }) => resolveDocumentId(params as DocumentIdParams)}
         />
       </Stack>
     </>

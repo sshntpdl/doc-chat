@@ -1,13 +1,6 @@
-// FILE: /apps/web/tailwind.config.ts
-// Tailwind v3 config. Tells Tailwind which files to scan for class names.
-// Without this, Tailwind ships zero CSS because it finds no classes to include.
-
 import type { Config } from "tailwindcss";
 
 const config: Config = {
-  // darkMode: 'class' means Tailwind enables dark: prefix when
-  // the <html> element has class="dark" on it.
-  // Our uiStore.setTheme() and the inline script in layout.tsx handle this.
   darkMode: "class",
 
   content: [
@@ -22,9 +15,6 @@ const config: Config = {
         sans: ["var(--font-inter)", "system-ui", "sans-serif"],
       },
       colors: {
-        // Map our CSS custom properties to Tailwind color names.
-        // This lets us use bg-background, text-foreground, etc.
-        // The actual hex values live in globals.css as CSS variables.
         background: "var(--color-background)",
         foreground: "var(--color-foreground)",
         surface: "var(--color-surface)",

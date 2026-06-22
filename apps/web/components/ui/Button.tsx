@@ -7,7 +7,11 @@ import { forwardRef, type ButtonHTMLAttributes } from "react";
 type Variant = "primary" | "secondary" | "destructive" | "ghost" | "outline";
 type Size = "sm" | "md" | "lg";
 
-interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+// Omit the native broken style prop and redefine it cleanly as any
+interface ButtonProps extends Omit<
+  ButtonHTMLAttributes<HTMLButtonElement>,
+  "style"
+> {
   variant?: Variant;
   size?: Size;
   isLoading?: boolean;
@@ -16,6 +20,7 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   /** Icon shown to the right of children */
   rightIcon?: React.ReactNode;
   fullWidth?: boolean;
+  style?: any;
 }
 
 const variantClasses: Record<Variant, string> = {
@@ -51,6 +56,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       children,
       className = "",
       disabled,
+      style,
       ...rest
     },
     ref,
@@ -62,6 +68,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         ref={ref}
         disabled={isDisabled}
         aria-busy={isLoading}
+        style={style}
         className={[
           "inline-flex items-center justify-center font-medium",
           "transition-all duration-[var(--duration-fast)]",

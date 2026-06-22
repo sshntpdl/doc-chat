@@ -1,43 +1,40 @@
-// FILE: apps/mobile/components/ui/EmptyState.tsx
-//
-// Reusable full-screen empty state used across the app:
-//   - No documents uploaded yet (Library screen)
-//   - No chat selected yet (Chat tab)
-//   - Search returns zero results
-//
-// Props are intentionally flexible so one component covers every scenario.
-
+import React, { memo } from "react";
 import {
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
   type ViewStyle,
+  type AccessibilityRole,
 } from "react-native";
 
 interface EmptyStateProps {
   /** Large emoji shown as the illustration */
-  emoji: string;
+  readonly emoji: string;
   /** Bold headline */
-  title: string;
+  readonly title: string;
   /** Softer description text below the title */
-  subtitle?: string;
+  readonly subtitle?: string;
   /** Label for the primary CTA button. Omit to hide the button. */
-  actionLabel?: string;
+  readonly actionLabel?: string;
   /** Called when the CTA button is pressed */
-  onAction?: () => void;
+  readonly onAction?: () => void;
   /** Optional extra styles on the outer container */
-  style?: ViewStyle;
+  readonly style?: ViewStyle;
 }
 
-export function EmptyState({
+const BUTTON_ACCESSIBILITY_ROLE: AccessibilityRole = "button";
+
+function EmptyStateComponent({
   emoji,
   title,
   subtitle,
   actionLabel,
   onAction,
   style,
-}: EmptyStateProps) {
+}: EmptyStateProps): React.JSX.Element {
+  const showCta = Boolean(actionLabel && onAction);
+
   return (
     <View style={[s.container, style]}>
       {/* Illustration */}
@@ -47,15 +44,16 @@ export function EmptyState({
 
       {/* Text */}
       <Text style={s.title}>{title}</Text>
-      {subtitle ? <Text style={s.subtitle}>{subtitle}</Text> : null}
+
+      {subtitle != null ? <Text style={s.subtitle}>{subtitle}</Text> : null}
 
       {/* CTA */}
-      {actionLabel && onAction ? (
+      {showCta ? (
         <TouchableOpacity
           style={s.button}
           onPress={onAction}
           activeOpacity={0.8}
-          accessibilityRole="button"
+          accessibilityRole={BUTTON_ACCESSIBILITY_ROLE}
           accessibilityLabel={actionLabel}
         >
           <Text style={s.buttonText}>{actionLabel}</Text>
@@ -64,6 +62,8 @@ export function EmptyState({
     </View>
   );
 }
+
+export const EmptyState = memo(EmptyStateComponent);
 
 const s = StyleSheet.create({
   container: {

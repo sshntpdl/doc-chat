@@ -1,34 +1,137 @@
-// FILE: /apps/web/app/api/auth/set-session/route.ts
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const CHUNK_SIZE = 3180; // v0.3.0 MAX_CHUNK_SIZE
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
-function getProjectRef() {
-  return process.env.NEXT_PUBLIC_SUPABASE_URL!.split("//")[1].split(".")[0];
+const MAX_CHUNK_SIZE = 3180;
+
+// ─── TYPES ────────────────────────────────────────────────────────────────────
+
+interface SetSessionBody {
+  access_token: string;
+  refresh_token: string;
+  expires_at?: number;
+  expires_in?: number;
+  user?: Record<string, unknown>;
 }
 
-function buildCookieOptions(maxAge: number) {
+interface CookieOptions {
+  path: string;
+  httpOnly: boolean;
+  sameSite: "lax" | "strict" | "none";
+  secure: boolean;
+  maxAge: number;
+}
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+function getProjectRef(): string {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!url) {
+    throw new Error("NEXT_PUBLIC_SUPABASE_URL is not set");
+  }
+  return url.split("//")[1].split(".")[0];
+}
+
+function buildCookieOptions(maxAge: number): CookieOptions {
   return {
     path: "/",
     httpOnly: true,
-    sameSite: "lax" as const,
+    sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     maxAge,
   };
 }
 
-export async function POST(request: NextRequest) {
-  try {
-    const body = (await request.json()) as {
-      access_token: string;
-      refresh_token: string;
-      expires_at?: number;
-      expires_in?: number;
-      user?: object;
-    };
+function splitIntoChunks(value: string): string[] {
+  let encodedRemaining = encodeURIComponent(value);
+  const chunks: string[] = [];
 
-    const { access_token, refresh_token, expires_at, expires_in, user } = body;
+  while (encodedRemaining.length > 0) {
+    // Take up to MAX_CHUNK_SIZE encoded characters
+    let encodedHead = encodedRemaining.slice(0, MAX_CHUNK_SIZE);
+
+    // Don't cut in the middle of a %XX escape: walk back to the last safe %
+    const lastEscapePos = encodedHead.lastIndexOf("%");
+    if (lastEscapePos > MAX_CHUNK_SIZE - 3) {
+      encodedHead = encodedHead.slice(0, lastEscapePos);
+    }
+
+    // Decode the clean head — walk back further if decodeURIComponent throws
+    let decodedHead = "";
+    let safeEncodedHead = encodedHead;
+    while (safeEncodedHead.length > 0) {
+      try {
+        decodedHead = decodeURIComponent(safeEncodedHead);
+        break;
+      } catch {
+        // Trim the last 3 characters (one potential %XX sequence) and retry
+        safeEncodedHead = safeEncodedHead.slice(0, safeEncodedHead.length - 3);
+      }
+    }
+
+    chunks.push(decodedHead);
+    encodedRemaining = encodedRemaining.slice(safeEncodedHead.length);
+  }
+
+  return chunks;
+}
+
+/**
+ * Serialize the Supabase session into the JSON string that auth-js expects
+ * to JSON.parse() when it reads the cookie back.
+ */
+function buildSessionPayload(body: SetSessionBody): string {
+  return JSON.stringify({
+    access_token: body.access_token,
+    token_type: "bearer",
+    expires_in: body.expires_in ?? 3600,
+    expires_at: body.expires_at ?? Math.floor(Date.now() / 1000) + 3600,
+    refresh_token: body.refresh_token,
+    user: body.user,
+  });
+}
+
+/**
+ * Write session cookies onto an existing NextResponse.
+ */
+function writeSessionCookies(
+  response: NextResponse,
+  cookieName: string,
+  payload: string,
+  maxAge: number,
+): void {
+  const options = buildCookieOptions(maxAge);
+  const encodedLength = encodeURIComponent(payload).length;
+
+  if (encodedLength <= MAX_CHUNK_SIZE) {
+    response.cookies.set(cookieName, payload, options);
+    return;
+  }
+
+  const chunks = splitIntoChunks(payload);
+  chunks.forEach((chunk, index) => {
+    response.cookies.set(`${cookieName}.${index}`, chunk, options);
+  });
+}
+
+/**
+ * Clear the base cookie and the first 5 chunk cookies (indices 0–4).
+ */
+function clearSessionCookies(response: NextResponse, cookieName: string): void {
+  const clearOptions = { path: "/", maxAge: 0 };
+  response.cookies.set(cookieName, "", clearOptions);
+  for (let i = 0; i < 5; i++) {
+    response.cookies.set(`${cookieName}.${i}`, "", clearOptions);
+  }
+}
+
+// ─── ROUTE HANDLERS ───────────────────────────────────────────────────────────
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  try {
+    const body = (await request.json()) as SetSessionBody;
+    const { access_token, refresh_token, user } = body;
 
     if (!access_token || !refresh_token || !user) {
       return NextResponse.json(
@@ -37,69 +140,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const COOKIE_NAME = `sb-${getProjectRef()}-auth-token`;
-    const maxAge = expires_in ?? 3600;
-
-    // v0.3.0: plain JSON string, no base64 encoding
-    // auth-js stores session as JSON.stringify(session) and reads with JSON.parse()
-    // @supabase/ssr v0.3.0 getItem returns raw cookie value, auth-js JSON.parses it
-    const sessionPayload = JSON.stringify({
-      access_token,
-      token_type: "bearer",
-      expires_in: expires_in ?? 3600,
-      expires_at: expires_at ?? Math.floor(Date.now() / 1000) + 3600,
-      refresh_token,
-      user,
-    });
-
+    const cookieName = `sb-${getProjectRef()}-auth-token`;
+    const maxAge = body.expires_in ?? 3600;
+    const payload = buildSessionPayload(body);
     const response = NextResponse.json({ ok: true });
 
-    // v0.3.0 createChunks uses encodeURIComponent to measure size
-    const encodedLength = encodeURIComponent(sessionPayload).length;
-
-    if (encodedLength <= CHUNK_SIZE) {
-      // Fits in one cookie — name: sb-*-auth-token
-      response.cookies.set(
-        COOKIE_NAME,
-        sessionPayload,
-        buildCookieOptions(maxAge),
-      );
-    } else {
-      // Chunk it — v0.3.0 reads sb-*-auth-token.0, .1, .2 ...
-      // Must chunk exactly like createChunks does
-      let encodedValue = encodeURIComponent(sessionPayload);
-      const chunks: string[] = [];
-
-      while (encodedValue.length > 0) {
-        let encodedChunkHead = encodedValue.slice(0, CHUNK_SIZE);
-        const lastEscapePos = encodedChunkHead.lastIndexOf("%");
-        if (lastEscapePos > CHUNK_SIZE - 3) {
-          encodedChunkHead = encodedChunkHead.slice(0, lastEscapePos);
-        }
-        let valueHead = "";
-        while (encodedChunkHead.length > 0) {
-          try {
-            valueHead = decodeURIComponent(encodedChunkHead);
-            break;
-          } catch {
-            encodedChunkHead = encodedChunkHead.slice(
-              0,
-              encodedChunkHead.length - 3,
-            );
-          }
-        }
-        chunks.push(valueHead);
-        encodedValue = encodedValue.slice(encodedChunkHead.length);
-      }
-
-      chunks.forEach((chunk, i) => {
-        response.cookies.set(
-          `${COOKIE_NAME}.${i}`,
-          chunk,
-          buildCookieOptions(maxAge),
-        );
-      });
-    }
+    writeSessionCookies(response, cookieName, payload, maxAge);
 
     return response;
   } catch {
@@ -107,12 +153,9 @@ export async function POST(request: NextRequest) {
   }
 }
 
-export async function DELETE(_request: NextRequest) {
-  const COOKIE_NAME = `sb-${getProjectRef()}-auth-token`;
+export async function DELETE(_request: NextRequest): Promise<NextResponse> {
+  const cookieName = `sb-${getProjectRef()}-auth-token`;
   const response = NextResponse.json({ ok: true });
-  response.cookies.set(COOKIE_NAME, "", { path: "/", maxAge: 0 });
-  for (let i = 0; i < 5; i++) {
-    response.cookies.set(`${COOKIE_NAME}.${i}`, "", { path: "/", maxAge: 0 });
-  }
+  clearSessionCookies(response, cookieName);
   return response;
 }

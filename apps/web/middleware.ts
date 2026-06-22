@@ -100,7 +100,7 @@ function isAllowedApiOrigin(origin: string, requestUrl: string): boolean {
 
   const allowed = new Set(
     [
-      requestOrigin, // whatever host this request actually came in on
+      requestOrigin,
       "http://localhost:3000",
       "http://127.0.0.1:3000",
       process.env.NEXT_PUBLIC_APP_URL,
@@ -127,8 +127,6 @@ export async function middleware(request: NextRequest) {
   const origin = request.headers.get("origin");
 
   // ── CORS preflight short-circuit ────────────────────────────────────────
-  // OPTIONS requests to /api/* never need auth/session logic — answer them
-  // directly and skip the Route Handler entirely.
   if (pathname.startsWith("/api/") && request.method === "OPTIONS") {
     const allowed = origin ? isAllowedApiOrigin(origin, request.url) : false;
     return new NextResponse(null, {

@@ -1,33 +1,26 @@
-// FILE: apps/mobile/components/ui/LoadingScreen.tsx
-//
-// Full-screen loading overlay used during:
-//   - Auth initialization (waiting for getSession())
-//   - Navigating between heavy screens
-//   - Any async operation that blocks the whole screen
-//
-// Shows the DocChat logo above the spinner so users know
-// which app they're in even during a blank/loading state.
-
+import React, { memo } from "react";
 import { View, Text, ActivityIndicator, StyleSheet } from "react-native";
+import type { AccessibilityRole } from "react-native";
 
 interface LoadingScreenProps {
-  /** Optional message shown below the spinner */
-  message?: string;
-  /** Show the DocChat logo above spinner (default true) */
-  showLogo?: boolean;
+  readonly message?: string;
+  readonly showLogo?: boolean;
 }
 
-export function LoadingScreen({
+const HEADER_ROLE: AccessibilityRole = "header";
+const DEFAULT_SHOW_LOGO = true;
+
+function LoadingScreenComponent({
   message,
-  showLogo = true,
-}: LoadingScreenProps) {
+  showLogo = DEFAULT_SHOW_LOGO,
+}: LoadingScreenProps): React.JSX.Element {
   return (
     <View style={s.container}>
-      {showLogo && (
-        <Text style={s.logo} accessibilityRole="header">
+      {showLogo ? (
+        <Text style={s.logo} accessibilityRole={HEADER_ROLE}>
           DocChat
         </Text>
-      )}
+      ) : null}
 
       <ActivityIndicator
         size="large"
@@ -35,10 +28,12 @@ export function LoadingScreen({
         accessibilityLabel={message ?? "Loading"}
       />
 
-      {message ? <Text style={s.message}>{message}</Text> : null}
+      {message != null ? <Text style={s.message}>{message}</Text> : null}
     </View>
   );
 }
+
+export const LoadingScreen = memo(LoadingScreenComponent);
 
 const s = StyleSheet.create({
   container: {

@@ -1,83 +1,67 @@
-// FILE: apps/mobile/components/chat/SuggestedQuestions.tsx
-//
-// Clickable question chips shown only when the chat is empty.
-// Tapping a chip fires onSelect(question) so the parent can
-// populate ChatInput (and optionally auto-send).
-//
-// FEATURE PARITY WITH WEB:
-//   ✅ DEFAULT_QUESTIONS constant + `questions` override prop
-//   ✅ Centered empty-state layout: icon → heading → subtext → chips
-//   ✅ Wrapping chip grid (flexWrap row, justify center)
-//   ✅ Press-scale animation  — mirrors web's  active:scale-[0.97]
-//   ✅ Primary-color highlight on press — mirrors web's hover:border/text-primary
-//   ✅ Full accessibility (role="list", accessibilityLabel per chip)
-//
-// MOBILE-SPECIFIC DECISIONS:
-//   - Animated.Value spring for the scale bounce (no CSS transitions available)
-//   - Pressable `pressed` state drives border/text colour change synchronously
-//   - hitSlop enlarges tap target without changing visual size
-//   - No ScrollView needed — 5 short chips wrap into ≤ 3 rows on any phone
-
-import { useRef, useCallback } from "react";
+import React, { useRef, useCallback, memo } from "react";
 import {
   View,
   Text,
   Pressable,
   StyleSheet,
   Animated,
-  type ViewStyle,
+  type AccessibilityRole,
 } from "react-native";
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
 
-const DEFAULT_QUESTIONS = [
+const DEFAULT_QUESTIONS: readonly string[] = [
   "Summarize this document",
   "What are the key takeaways?",
   "List all main topics covered",
   "What conclusions does this document reach?",
   "Are there any action items or recommendations?",
-];
+] as const;
 
-// ─── PROPS ────────────────────────────────────────────────────────────────────
+const HIT_SLOP = { top: 6, bottom: 6, left: 6, right: 6 } as const;
+
+const PRESS_IN_CONFIG = {
+  toValue: 0.97,
+  useNativeDriver: true,
+  speed: 60,
+  bounciness: 0,
+} as const;
+const PRESS_OUT_CONFIG = {
+  toValue: 1,
+  useNativeDriver: true,
+  speed: 40,
+  bounciness: 3,
+} as const;
+
+const LIST_ROLE: AccessibilityRole = "list";
+const BUTTON_ROLE: AccessibilityRole = "button";
+
+// ─── TYPES ────────────────────────────────────────────────────────────────────
 
 interface SuggestedQuestionsProps {
   /** Called with the question text when a chip is tapped */
-  onSelect: (question: string) => void;
+  readonly onSelect: (question: string) => void;
   /** Override default questions (e.g. derived from document metadata) */
-  questions?: string[];
+  readonly questions?: readonly string[];
 }
-
-// ─── QUESTION CHIP ───────────────────────────────────────────────────────────
-// Mirrors web:  active:scale-[0.97]  +  hover:border/text-[color-primary]
-//
-// Implementation note: we use a single Animated.Value for scale so that rapid
-// taps never leave the chip stuck at 0.97. The Pressable `pressed` boolean
-// drives the colour change in-sync with the native gesture recogniser.
 
 interface ChipProps {
-  label: string;
-  onPress: () => void;
+  readonly label: string;
+  readonly onPress: () => void;
 }
 
-function QuestionChip({ label, onPress }: ChipProps) {
+const QuestionChip = memo(function QuestionChip({
+  label,
+  onPress,
+}: ChipProps): React.JSX.Element {
   const scale = useRef(new Animated.Value(1)).current;
 
   const handlePressIn = useCallback(() => {
-    Animated.spring(scale, {
-      toValue: 0.97,
-      useNativeDriver: true,
-      speed: 60,
-      bounciness: 0,
-    }).start();
+    Animated.spring(scale, PRESS_IN_CONFIG).start();
   }, [scale]);
 
   const handlePressOut = useCallback(() => {
-    Animated.spring(scale, {
-      toValue: 1,
-      useNativeDriver: true,
-      speed: 40,
-      bounciness: 3,
-    }).start();
+    Animated.spring(scale, PRESS_OUT_CONFIG).start();
   }, [scale]);
 
   return (
@@ -85,12 +69,11 @@ function QuestionChip({ label, onPress }: ChipProps) {
       onPress={onPress}
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
-      accessibilityRole="button"
+      accessibilityRole={BUTTON_ROLE}
       accessibilityLabel={label}
       accessibilityHint="Tap to use this question"
-      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+      hitSlop={HIT_SLOP}
     >
-      {/* `pressed` drives the highlighted style — matches web hover:border/text-primary */}
       {({ pressed }) => (
         <Animated.View
           style={[s.chip, pressed && s.chipPressed, { transform: [{ scale }] }]}
@@ -102,21 +85,18 @@ function QuestionChip({ label, onPress }: ChipProps) {
       )}
     </Pressable>
   );
-}
+});
 
 // ─── MAIN COMPONENT ──────────────────────────────────────────────────────────
 
-export function SuggestedQuestions({
+function SuggestedQuestionsComponent({
   onSelect,
   questions = DEFAULT_QUESTIONS,
-}: SuggestedQuestionsProps) {
+}: SuggestedQuestionsProps): React.JSX.Element {
   return (
     <View style={s.container}>
       {/* ── Icon ── */}
-      <Text
-        style={s.icon}
-        accessible={false} // decorative — matches web's aria-hidden="true"
-      >
+      <Text style={s.icon} accessible={false}>
         💬
       </Text>
 
@@ -128,12 +108,10 @@ export function SuggestedQuestions({
         </Text>
       </View>
 
-      {/* ── Chip grid ──
-          accessibilityRole="list" mirrors the web's role="list".
-          Each chip carries its own accessibilityRole="button" + label. */}
+      {/* ── Chip grid ── */}
       <View
         style={s.chipGrid}
-        accessibilityRole="list"
+        accessibilityRole={LIST_ROLE}
         accessibilityLabel="Suggested questions"
       >
         {questions.map((q) => (
@@ -144,17 +122,10 @@ export function SuggestedQuestions({
   );
 }
 
-// ─── STYLES ──────────────────────────────────────────────────────────────────
-// Colour palette kept consistent with MessageBubble.tsx and SourceCitation.tsx:
-//   Background surface  → #1E293B
-//   Border default      → #334155
-//   Border / text hover → #6366F1  (indigo — colour-primary)
-//   Foreground          → #F1F5F9
-//   Muted               → #64748B
+export const SuggestedQuestions = memo(SuggestedQuestionsComponent);
 
 const s = StyleSheet.create({
   // ── Outer wrapper ──────────────────────────────────────────────────────────
-  // flex: 1 so it occupies the full empty chat area above ChatInput.
   container: {
     flex: 1,
     alignItems: "center",
@@ -167,7 +138,7 @@ const s = StyleSheet.create({
   // ── Emoji icon ─────────────────────────────────────────────────────────────
   icon: {
     fontSize: 48,
-    lineHeight: 56, // prevents clipping on Android
+    lineHeight: 56,
   },
 
   // ── Heading + subtext ──────────────────────────────────────────────────────
@@ -190,8 +161,6 @@ const s = StyleSheet.create({
   },
 
   // ── Chip grid ──────────────────────────────────────────────────────────────
-  // flexWrap: "wrap" + justifyContent: "center" replicates the web's
-  //   flex-wrap gap-2 justify-center  Tailwind classes.
   chipGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -203,25 +172,24 @@ const s = StyleSheet.create({
   chip: {
     paddingHorizontal: 16,
     paddingVertical: 9,
-    borderRadius: 999, // rounded-full
+    borderRadius: 999,
     borderWidth: 1,
-    borderColor: "#334155", // var(--color-border)
-    backgroundColor: "#1E293B", // var(--color-surface)
+    borderColor: "#334155",
+    backgroundColor: "#1E293B",
   },
   chipText: {
     fontSize: 13,
     fontWeight: "500",
-    color: "#CBD5E1", // var(--color-foreground) at reduced brightness
+    color: "#CBD5E1",
     lineHeight: 18,
   },
 
   // ── Chip — pressed state ───────────────────────────────────────────────────
-  // Mirrors  hover:border-[color-primary]  hover:text-[color-primary]
   chipPressed: {
-    borderColor: "#6366F1", // var(--color-primary)
-    backgroundColor: "#1E2A45", // subtly brighter than resting state
+    borderColor: "#6366F1",
+    backgroundColor: "#1E2A45",
   },
   chipTextPressed: {
-    color: "#818CF8", // var(--color-primary) lightened for dark bg
+    color: "#818CF8",
   },
 });
