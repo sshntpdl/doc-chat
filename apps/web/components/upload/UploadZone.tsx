@@ -1,4 +1,3 @@
-// FILE: /apps/web/components/upload/UploadZone.tsx
 "use client";
 
 import { useCallback } from "react";
@@ -179,15 +178,6 @@ export function UploadZone({ onClose }: Props) {
 
                       {/*
                        * Cancel / dismiss button.
-                       *
-                       * Shown for ALL statuses:
-                       *   uploading  → aborts the XHR mid-transfer
-                       *   processing → stops polling and removes the card
-                       *   error      → dismisses the error card
-                       *   ready      → dismisses the completed card
-                       *               (document is already in the grid)
-                       *
-                       * aria-label is status-aware for screen readers.
                        */}
                       <button
                         onClick={() => cancelUpload(item.tempId)}

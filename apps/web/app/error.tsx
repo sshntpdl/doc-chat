@@ -1,8 +1,3 @@
-// FILE: apps/web/app/error.tsx
-// Next.js error boundary — catches unhandled runtime errors in
-// Server and Client Components within the same layout segment.
-// Must be a Client Component (it receives the error object from React).
-
 "use client";
 
 import { useEffect } from "react";

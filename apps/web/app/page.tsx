@@ -1,7 +1,4 @@
-// FILE: apps/web/app/page.tsx
-// Root landing page at /
-// Server Component: checks auth and redirects authenticated users to /dashboard.
-// Unauthenticated users see the marketing hero page.
+// Root landing page
 
 import Link from "next/link";
 import { cookies } from "next/headers";

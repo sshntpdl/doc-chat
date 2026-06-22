@@ -1,17 +1,18 @@
-// FILE: /apps/web/components/dashboard/DashboardNav.tsx
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import Link                            from "next/link";
-import { useRouter }                   from "next/navigation";
-import type { User }                   from "@supabase/supabase-js";
-import { useAuthStore, useUIStore }    from "@docchat/stores";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import type { User } from "@supabase/supabase-js";
+import { useAuthStore, useUIStore } from "@docchat/stores";
 
-interface Props { user: User }
+interface Props {
+  user: User;
+}
 
 export function DashboardNav({ user }: Props) {
-  const router         = useRouter();
-  const signOut        = useAuthStore((s) => s.signOut);
+  const router = useRouter();
+  const signOut = useAuthStore((s) => s.signOut);
   const { theme, setTheme, openCommandPalette } = useUIStore();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -44,10 +45,22 @@ export function DashboardNav({ user }: Props) {
     router.push("/auth/login");
   }
 
-  const avatarLetter = (user.user_metadata?.full_name?.[0] ?? user.email?.[0] ?? "U").toUpperCase();
+  const avatarLetter = (
+    user.user_metadata?.full_name?.[0] ??
+    user.email?.[0] ??
+    "U"
+  ).toUpperCase();
 
-  const nextTheme: Record<string, string> = { light: "dark", dark: "system", system: "light" };
-  const themeIcon: Record<string, string> = { light: "☀️", dark: "🌙", system: "💻" };
+  const nextTheme: Record<string, string> = {
+    light: "dark",
+    dark: "system",
+    system: "light",
+  };
+  const themeIcon: Record<string, string> = {
+    light: "☀️",
+    dark: "🌙",
+    system: "💻",
+  };
 
   return (
     <nav
@@ -74,8 +87,12 @@ export function DashboardNav({ user }: Props) {
               aria-label="Open command palette"
             >
               <span>Search...</span>
-              <kbd className="text-xs bg-[var(--color-surface)] border border-[var(--color-border)]
-                              px-1.5 py-0.5 rounded font-mono">⌘K</kbd>
+              <kbd
+                className="text-xs bg-[var(--color-surface)] border border-[var(--color-border)]
+                              px-1.5 py-0.5 rounded font-mono"
+              >
+                ⌘K
+              </kbd>
             </button>
 
             {/* Theme toggle */}

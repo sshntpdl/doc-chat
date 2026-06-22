@@ -1,4 +1,3 @@
-// FILE: /apps/web/components/dashboard/DocumentCard.tsx
 "use client";
 
 import { useState } from "react";
@@ -6,13 +5,6 @@ import type { Document } from "@docchat/types";
 import { useDocumentStore, useToast } from "@docchat/stores";
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
-//
-// Color system: each file type carries a two-stop gradient used for its icon
-// avatar, its ambient hover glow, and a hairline gradient border that appears
-// on hover (built with a plain padding-box trick — no inline CSS vars, so it
-// can't collide with any global CSSProperties augmentation in the host app).
-// Red is intentionally retired from the "neutral" file types — it's reserved
-// for error/destructive states only, where it actually carries meaning.
 
 const FILE_CONFIG: Record<
   string,
@@ -270,10 +262,6 @@ export function DocumentCard({ document: doc, onChat }: Props) {
   }
 
   return (
-    // Outer shell: a 1px "border" built from background color (padding-box
-    // trick). At rest it's the standard neutral border; on hover the
-    // background becomes the file-type gradient, so the border itself
-    // animates color — no inline styles, no custom CSS properties.
     <article
       className={`group relative rounded-2xl p-px bg-[var(--color-border)]
                   bg-gradient-to-br ${fileCfg.hoverFrom} ${fileCfg.hoverTo}

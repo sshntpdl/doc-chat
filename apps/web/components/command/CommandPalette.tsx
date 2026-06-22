@@ -1,21 +1,4 @@
-// FILE: apps/web/components/command/CommandPalette.tsx
 "use client";
-//
-// Global ⌘K command palette powered by the `cmdk` package.
-// Opened by:
-//   - Keyboard shortcut ⌘K (Mac) / Ctrl+K (Windows/Linux)  — wired in DashboardNav
-//   - Clicking the search button in the nav bar
-//
-// SEARCH CATEGORIES:
-//   Documents  — navigates to /chat/:id
-//   Actions    — Upload, Sign out, Toggle theme
-//
-// BEHAVIOUR:
-//   - Shows recent documents when search is empty
-//   - Fuzzy filters as user types
-//   - Keyboard: ↑↓ arrows, Enter to select, Escape to close
-//   - Closes automatically after any selection
-
 import { useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Command } from "cmdk";
@@ -79,7 +62,6 @@ export function CommandPalette() {
         className="w-full max-w-lg bg-[var(--color-background)]
                    rounded-[var(--radius-xl)] border border-[var(--color-border)]
                    shadow-[var(--shadow-elevated)] overflow-hidden"
-        // cmdk handles ↑↓ and Enter internally
       >
         {/* Search input */}
         <div

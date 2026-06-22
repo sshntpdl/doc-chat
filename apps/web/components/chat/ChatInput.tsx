@@ -1,16 +1,4 @@
-// FILE: apps/web/components/chat/ChatInput.tsx
 "use client";
-//
-// The message input area at the bottom of the chat page.
-// Extracted from chat/[documentId]/page.tsx for reuse and testability.
-//
-// FEATURES:
-//   - Textarea auto-grows from 1 line up to 5 lines then scrolls
-//   - Enter sends, Shift+Enter inserts newline
-//   - Character counter appears at 1500+ chars (limit is 2000)
-//   - Send button becomes a Stop button (■) while AI is streaming
-//   - Disabled and shows subtle message while offline
-
 import {
   useRef,
   useCallback,

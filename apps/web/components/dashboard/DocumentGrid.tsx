@@ -1,4 +1,3 @@
-// FILE: /apps/web/components/dashboard/DocumentGrid.tsx
 "use client";
 
 import { useState, useMemo, useEffect } from "react";
@@ -205,11 +204,6 @@ export function DocumentGrid({ initialDocuments }: Props) {
 
                 {/*
                  * Cancel / dismiss button.
-                 *
-                 * uploading  → aborts the XHR and removes the card
-                 * processing → stops polling and removes the card
-                 * error      → dismisses the error card
-                 * ready      → dismisses the completed card
                  */}
                 <button
                   onClick={() => cancelUpload(item.tempId)}

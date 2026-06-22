@@ -1,41 +1,4 @@
-// FILE: apps/web/components/chat/ChatSidebar.tsx
 "use client";
-//
-// CHANGES vs v2:
-//
-// 1. REAL SESSION LIST WITH INFINITE SCROLL:
-//    Sessions are fetched from the server via fetchSessions() (called by
-//    ensureSessionForDocument in the store). The list renders all sessions
-//    for the current document, newest-first. As the user scrolls to the
-//    bottom of the list, an IntersectionObserver fires fetchSessions() again
-//    to load the next page (cursor-based pagination, 15 per page).
-//
-// 2. LOADING STATES:
-//    - Initial load: shows a skeleton shimmer for 3 placeholder rows.
-//    - Load-more (scroll): shows a subtle spinner row at the list bottom.
-//    - Each row fetches its full message history lazily on first select
-//      (loadHistory is called by onSelectSession in ChatPage).
-//
-// 3. ACTIVE SESSION HIGHLIGHT + HISTORY STUB DISPLAY:
-//    Sessions fetched from the server are stubs (no messages yet). Their
-//    message count is only shown after loadHistory() fills them in — until
-//    then we show a "tap to load" hint alongside the date.
-//
-// 4. DELETE BUTTON (unchanged from v2 — kept as-is):
-//    Trash icon on hover, confirm for sessions with messages, streaming guard.
-//
-// 5. "+ New Chat" BUTTON STATE (unchanged from v2):
-//    Dimmed + tooltip when already in an empty session.
-//
-// VISUAL REFRESH (this pass):
-//    Restyled to match the reference layout — pill-shaped "Library" nav,
-//    a proper document card (icon avatar + name + meta) instead of a bare
-//    text block, and a left-accent-bar treatment for the active session
-//    instead of a solid highlight fill. No store wiring, handlers, or
-//    pagination logic were changed — markup/classNames and two copy
-//    strings only ("Chats" → "History"; unloaded stub now says
-//    "tap to load" instead of nothing).
-
 import { useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
 import { useChatStore, useSessionList } from "@docchat/stores";
@@ -135,7 +98,6 @@ function FileGlyph() {
 }
 
 // ─── SKELETON ─────────────────────────────────────────────────────────────────
-// Shown on the very first load before any sessions arrive.
 
 function SessionSkeleton() {
   return (
@@ -157,8 +119,6 @@ function SessionSkeleton() {
 }
 
 // ─── LOAD-MORE SENTINEL ───────────────────────────────────────────────────────
-// An invisible element at the bottom of the list. When it scrolls into view
-// the IntersectionObserver fires and we fetch the next page.
 
 interface SentinelProps {
   onVisible: () => void;
@@ -179,9 +139,7 @@ function LoadMoreSentinel({ onVisible, isFetching }: SentinelProps) {
         }
       },
       {
-        // Fire when the sentinel is fully within the scrollable container
         threshold: 0.1,
-        // Root = the nearest scrollable ancestor (the session list div)
         rootMargin: "0px 0px 40px 0px",
       },
     );
@@ -363,8 +321,6 @@ export function ChatSidebar({
         {/* Session rows */}
         {sessions.map((session) => {
           const isActive = session.id === activeSessionId;
-          // isLoaded = true means messages array is hydrated from the server.
-          // For stub sessions (isLoaded=false), we don't know the message count yet.
           const hasMessages = session.messages.length > 0;
           const msgCount = session.messages.length;
           const dateLabel = new Date(session.createdAt).toLocaleDateString(
@@ -374,8 +330,6 @@ export function ChatSidebar({
           const isDeleting = deletingId === session.id;
           const showDelete = hoveredId === session.id && !isDeleting;
 
-          // Sub-label: show msg count when loaded, "empty" for confirmed-empty,
-          // "tap to load" for unhydrated stubs (history not fetched yet).
           let subLabel: string;
           if (session.isLoaded) {
             subLabel = hasMessages
@@ -463,7 +417,6 @@ export function ChatSidebar({
         {/* Initial skeleton — shown only before the first fetch completes */}
         {!hasFetched && <SessionSkeleton />}
 
-        {/* Infinite-scroll sentinel — only rendered when more pages exist */}
         {hasFetched && hasMore && (
           <LoadMoreSentinel
             onVisible={handleLoadMore}

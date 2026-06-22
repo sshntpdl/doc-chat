@@ -1,9 +1,4 @@
-// FILE: apps/web/components/chat/SuggestedQuestions.tsx
 "use client";
-// Clickable question chips shown only when the chat is empty.
-// Tapping a chip populates the textarea and focuses it so the
-// user can send immediately or edit before sending.
-
 const DEFAULT_QUESTIONS = [
   "Summarize this document",
   "What are the key takeaways?",
@@ -13,9 +8,7 @@ const DEFAULT_QUESTIONS = [
 ];
 
 interface SuggestedQuestionsProps {
-  /** Called with the question text when a chip is clicked */
   onSelect: (question: string) => void;
-  /** Override default questions (e.g. from document metadata) */
   questions?: string[];
 }
 

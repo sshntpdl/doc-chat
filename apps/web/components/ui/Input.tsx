@@ -1,10 +1,5 @@
-// FILE: apps/web/components/ui/Input.tsx
-// Reusable text input with label, helper text, error state, and icon slots.
-// All form fields across login, search, and chat use this component.
-
 import { forwardRef, type InputHTMLAttributes } from "react";
 
-// Omit the native broken style prop and redefine it cleanly as any
 interface InputProps extends Omit<
   InputHTMLAttributes<HTMLInputElement>,
   "style"
@@ -14,7 +9,6 @@ interface InputProps extends Omit<
   helperText?: string;
   leftIcon?: React.ReactNode;
   rightIcon?: React.ReactNode;
-  /** Full-width by default */
   fullWidth?: boolean;
   style?: any;
 }

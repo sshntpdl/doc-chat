@@ -1,8 +1,3 @@
-// FILE: /packages/types/src/index.ts
-// Central hub for all shared types used by web, mobile, and backend.
-// Keeping types in one package ensures a single source of truth — if
-// the API response shape changes, both clients see it immediately.
-
 // ─── ERROR SYSTEM ────────────────────────────────────────────────────────────
 
 /**
@@ -12,31 +7,31 @@
  */
 export enum ErrorCode {
   // Upload / ingest errors
-  UPLOAD_TOO_LARGE      = "UPLOAD_TOO_LARGE",
+  UPLOAD_TOO_LARGE = "UPLOAD_TOO_LARGE",
   UNSUPPORTED_FILE_TYPE = "UNSUPPORTED_FILE_TYPE",
-  EMPTY_FILE            = "EMPTY_FILE",
-  ENCRYPTED_PDF         = "ENCRYPTED_PDF",
-  EMBEDDING_FAILED      = "EMBEDDING_FAILED",
+  EMPTY_FILE = "EMPTY_FILE",
+  ENCRYPTED_PDF = "ENCRYPTED_PDF",
+  EMBEDDING_FAILED = "EMBEDDING_FAILED",
   TEXT_EXTRACTION_FAILED = "TEXT_EXTRACTION_FAILED",
 
   // LLM / AI errors
-  GROQ_UNAVAILABLE      = "GROQ_UNAVAILABLE",
-  STREAM_INTERRUPTED    = "STREAM_INTERRUPTED",
+  GROQ_UNAVAILABLE = "GROQ_UNAVAILABLE",
+  STREAM_INTERRUPTED = "STREAM_INTERRUPTED",
 
   // Auth errors
-  UNAUTHORIZED          = "UNAUTHORIZED",
-  SESSION_EXPIRED       = "SESSION_EXPIRED",
+  UNAUTHORIZED = "UNAUTHORIZED",
+  SESSION_EXPIRED = "SESSION_EXPIRED",
 
   // Rate limiting
-  RATE_LIMITED          = "RATE_LIMITED",
+  RATE_LIMITED = "RATE_LIMITED",
 
   // Data errors
-  DOCUMENT_NOT_FOUND    = "DOCUMENT_NOT_FOUND",
-  SESSION_NOT_FOUND     = "SESSION_NOT_FOUND",
-  INVALID_INPUT         = "INVALID_INPUT",
+  DOCUMENT_NOT_FOUND = "DOCUMENT_NOT_FOUND",
+  SESSION_NOT_FOUND = "SESSION_NOT_FOUND",
+  INVALID_INPUT = "INVALID_INPUT",
 
   // Network
-  NETWORK_ERROR         = "NETWORK_ERROR",
+  NETWORK_ERROR = "NETWORK_ERROR",
 }
 
 /**
@@ -50,7 +45,7 @@ export class AppError extends Error {
     public readonly message: string,
     public readonly statusCode: number = 500,
     public readonly retryable: boolean = false,
-    public readonly details?: Record<string, unknown>
+    public readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "AppError";
@@ -80,7 +75,7 @@ export class AppError extends Error {
       obj.message,
       obj.statusCode,
       obj.retryable,
-      obj.details
+      obj.details,
     );
   }
 }
@@ -88,7 +83,7 @@ export class AppError extends Error {
 // ─── DOCUMENT TYPES ───────────────────────────────────────────────────────────
 
 export type DocumentStatus = "processing" | "ready" | "error" | "partial";
-export type DocumentType   = "pdf" | "text" | "markdown";
+export type DocumentType = "pdf" | "text" | "markdown";
 
 export interface Document {
   id: string;
@@ -148,14 +143,13 @@ export interface ChatSession {
 }
 
 // ─── SSE EVENT TYPES (chat streaming) ────────────────────────────────────────
-// Each SSE message carries a JSON payload matching one of these shapes.
 
 export type SSEEvent =
-  | { type: "start";   messageId: string; sessionId: string }
-  | { type: "token";   content: string }
+  | { type: "start"; messageId: string; sessionId: string }
+  | { type: "token"; content: string }
   | { type: "sources"; sources: SourceCitation[] }
-  | { type: "done";    messageId: string; totalTokens: number }
-  | { type: "error";   code: ErrorCode; message: string; retryable: boolean };
+  | { type: "done"; messageId: string; totalTokens: number }
+  | { type: "error"; code: ErrorCode; message: string; retryable: boolean };
 
 // ─── UPLOAD TYPES ─────────────────────────────────────────────────────────────
 
@@ -181,9 +175,9 @@ export interface IngestResponse {
 }
 
 export interface ChatRequest {
-  sessionId?: string;   // omit to create a new session
-  content: string;      // user's message (max 2000 chars)
-  documentId?: string;  // scope RAG to one document if provided
+  sessionId?: string; // omit to create a new session
+  content: string; // user's message (max 2000 chars)
+  documentId?: string; // scope RAG to one document if provided
 }
 
 export interface HistoryResponse {
@@ -196,7 +190,6 @@ export interface DocumentsResponse {
 
 // ─── API CLIENT UTILITY TYPE ──────────────────────────────────────────────────
 
-/** Discriminated union so callers can use exhaustive checks */
 export type ApiResult<T> =
-  | { ok: true;  data: T }
+  | { ok: true; data: T }
   | { ok: false; error: AppError };

@@ -6,16 +6,14 @@
     "scheme": "docchat",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "dark",
     "backgroundColor": "#0F172A",
     "splash": {
-      "image": "./assets/splash.png",
+      "image": "./assets/icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#0F172A"
     },
-    "assetBundlePatterns": [
-      "**/*"
-    ],
+    "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": true,
       "backgroundColor": "#0F172A",
@@ -28,13 +26,11 @@
       "softwareKeyboardLayoutMode": "pan",
       "backgroundColor": "#0F172A",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#4F46E5"
       },
       "package": "com.docchat.app",
-      "permissions": [
-        "READ_EXTERNAL_STORAGE"
-      ]
+      "permissions": ["READ_EXTERNAL_STORAGE"]
     },
     "plugins": [
       "expo-router",

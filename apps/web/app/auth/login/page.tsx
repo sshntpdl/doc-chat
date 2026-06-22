@@ -1,12 +1,5 @@
-// FILE: /apps/web/app/auth/login/page.tsx
 "use client";
 // Full auth page: sign in + sign up in one component, animated slide transition.
-// Magic link flow: submit email → "Check your inbox" state with 30s resend countdown.
-//
-// FIX: Removed imperative router.push() after signInWithEmail. Instead, a useEffect
-// watches the store's `user` field — which is set by onAuthStateChange AFTER the SDK
-// has written the session cookies — and only then navigates. This ensures the
-// middleware finds valid cookies on the next request and doesn't redirect back to login.
 
 import { useState, useEffect, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -23,9 +16,6 @@ export default function LoginPage() {
     useAuthStore();
 
   // ── NEW: watch user + isInitialized from the store ────────────────────
-  // When onAuthStateChange fires after a successful login, it updates
-  // the store's `user`. We react to that here and navigate — this
-  // guarantees we only redirect AFTER the session cookies are written.
   const user = useAuthStore((s) => s.user);
   const isInitialized = useAuthStore((s) => s.isInitialized);
 
@@ -42,11 +32,6 @@ export default function LoginPage() {
   const [isPending, startTransition] = useTransition();
 
   // ── Navigate once session cookies are confirmed written ────────────────
-  // The store's `user` is null until onAuthStateChange fires with
-  // event === "SIGNED_IN", which only happens after @supabase/ssr has
-  // persisted the tokens to cookies. Watching here avoids the race where
-  // router.push() fires before cookies are written and the middleware
-  // incorrectly sees an unauthenticated request.
   useEffect(() => {
     if (isInitialized && user) {
       router.replace(redirectTo);
@@ -86,7 +71,6 @@ export default function LoginPage() {
       return;
     }
 
-    // Fixed: Keep startTransition wrapper synchronous for React 18 compatibility
     startTransition(() => {
       (async () => {
         const err =
@@ -112,7 +96,6 @@ export default function LoginPage() {
       return;
     }
 
-    // Fixed: Keep startTransition wrapper synchronous for React 18 compatibility
     startTransition(() => {
       (async () => {
         const err = await signInWithMagicLink(email);

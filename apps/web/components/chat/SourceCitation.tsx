@@ -1,4 +1,3 @@
-// FILE: /apps/web/components/chat/SourceCitation.tsx
 "use client";
 
 import { useState } from "react";

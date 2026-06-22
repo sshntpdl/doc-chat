@@ -1,8 +1,3 @@
-// FILE: apps/web/app/loading.tsx
-// Next.js Suspense boundary shown while any Server Component on this
-// layout level is still streaming/fetching. Keeps the UI from being
-// blank during initial page transitions.
-
 export default function RootLoading() {
   return (
     <div

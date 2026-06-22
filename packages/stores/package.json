@@ -9,9 +9,9 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@docchat/types": "*",
     "@docchat/supabase": "*",
-    "zustand": "^4.5.2",
-    "immer": "^10.1.1"
+    "@docchat/types": "*",
+    "immer": "^10.1.1",
+    "zustand": "^4.5.2"
   }
 }

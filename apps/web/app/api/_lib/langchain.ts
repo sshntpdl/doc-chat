@@ -1,25 +1,6 @@
-// FILE: /apps/web/app/api/_lib/langchain.ts
-//
-// Singleton instances of expensive AI clients reused across requests.
-//
-// WHY SINGLETONS:
-// Creating a new ChatGroq or HuggingFaceInferenceEmbeddings instance on
-// every request wastes time (constructor overhead, connection setup) and
-// could exhaust file descriptors. Node.js module caching ensures these
-// are created once per serverless function warm instance.
-//
-// EMBEDDING RETRY LOGIC:
-// HuggingFace free tier "cold starts" a model if it hasn't been used recently.
-// The first request returns HTTP 503 with {"error":"Model ... is currently loading"}.
-// We wait 3 seconds and retry up to 2 times. After that, we fail loudly.
-
 import { ChatGroq } from "@langchain/groq";
 import { HuggingFaceInferenceEmbeddings } from "@langchain/community/embeddings/hf";
-import {
-  HumanMessage,
-  AIMessage,
-  SystemMessage,
-} from "@langchain/core/messages";
+import { HumanMessage, AIMessage } from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { AppError, ErrorCode } from "@docchat/types";
@@ -76,11 +57,6 @@ export function getEmbeddingsClient(): HuggingFaceInferenceEmbeddings {
 
 // ─── embedQuery (with retry) ──────────────────────────────────────────────────
 
-/**
- * Embed a single query string with HuggingFace.
- * Retries twice on 503 (model loading) with a 3-second delay.
- * Returns a 384-dimensional float array.
- */
 export async function embedQuery(text: string): Promise<number[]> {
   const client = getEmbeddingsClient();
   const maxRetries = 2;
@@ -144,21 +120,6 @@ export interface RetrievedChunk {
   similarity: number;
 }
 
-/**
- * FIX #11 — "Unknown Document" / "[Doc: undefined, ...]" (NEW):
- *   The match_chunks RPC returns raw Postgres rows, whose columns are
- *   snake_case (document_id) — NOT the camelCase (documentId) shape
- *   RetrievedChunk declares. retrieveChunks was casting the raw rows
- *   straight to RetrievedChunk[] with `as`, which is a compile-time-only
- *   assertion — it doesn't actually rename anything at runtime. So
- *   chunk.documentId was `undefined` for every chunk, which broke the
- *   "Unknown Document" badge AND injected the literal string "undefined"
- *   into the prompt sent to the model.
- *
- *   This mapper normalizes either casing defensively (row.documentId ??
- *   row.document_id), so it's correct regardless of how match_chunks
- *   happens to alias its output columns.
- */
 function mapRetrievedChunk(row: any): RetrievedChunk {
   return {
     id: row.id,
@@ -174,13 +135,6 @@ function mapRetrievedChunk(row: any): RetrievedChunk {
 
 /**
  * Call the Supabase match_chunks RPC to find the K nearest chunks.
- * This is where the RAG "retrieval" step happens.
- *
- * @param queryEmbedding  — 384-dim vector from embedQuery()
- * @param supabase        — authenticated Supabase client (RLS enforced)
- * @param userId          — defense-in-depth filter inside the SQL function
- * @param documentId      — scope to one document (null = all user docs)
- * @param k               — number of chunks to return (default 4)
  */
 export async function retrieveChunks(
   queryEmbedding: number[],
@@ -189,7 +143,6 @@ export async function retrieveChunks(
   documentId: string | null = null,
   k = 4,
 ): Promise<RetrievedChunk[]> {
-  // FIX: validate embedding before sending to avoid a confusing pgvector error
   if (!queryEmbedding || queryEmbedding.length === 0) {
     throw new AppError(
       ErrorCode.EMBEDDING_FAILED,
@@ -207,7 +160,6 @@ export async function retrieveChunks(
   });
 
   if (error) {
-    // Surface the Supabase/pgvector error message directly
     throw new AppError(
       ErrorCode.EMBEDDING_FAILED,
       `Vector search failed: ${error.message} (code: ${error.code})`,
@@ -221,36 +173,14 @@ export async function retrieveChunks(
 
 // ─── buildChatHistory ─────────────────────────────────────────────────────────
 
-/**
- * Convert DB chat messages (or plain {role, content} rows) to LangChain
- * BaseMessage instances.
- *
- * WHY THE SIGNATURE ACCEPTS A BROADER TYPE:
- * The route handler fetches messages directly from Supabase as
- * Array<{role: string, content: string}> — plain objects, not full ChatMessage
- * entities. Passing them to this function with `as any` was suppressing a
- * type error but letting malformed data through. We now accept the raw DB
- * shape explicitly so the cast is unnecessary and the mapping is safe.
- *
- * IMPORTANT — do NOT pass the pre-allocated empty assistant message that was
- * just inserted into the DB (content: "") into history. The route handler
- * already excludes it because it fetches history BEFORE inserting the new
- * messages, so this is safe as-is.
- *
- * We only pass the last 20 messages (10 turns) to keep the context window
- * manageable — older history is truncated.
- */
 export function buildChatHistory(
   messages: Array<{ role: string; content: string }>,
 ): BaseMessage[] {
-  // Take last 20 messages (10 turns) for context window efficiency
   const recent = messages.slice(-20);
 
   return recent
     .filter((msg) => {
-      // Skip empty assistant placeholders that sneak in from pre-allocation
       if (msg.role === "assistant" && !msg.content?.trim()) return false;
-      // Skip anything with an unrecognised role to avoid LangChain choking
       if (msg.role !== "user" && msg.role !== "assistant") return false;
       return true;
     })
@@ -263,16 +193,6 @@ export function buildChatHistory(
 
 // ─── fetchDocumentNameMap ─────────────────────────────────────────────────────
 
-/**
- * FIX #11 (continued) — resolve documentId → filename ONCE, up front, and
- * reuse the same map for both the system prompt's citation labels and the
- * SSE "sources" event. Previously this lookup only happened inside
- * buildSourceCitations, AFTER streaming had already finished — so the
- * model itself never saw real filenames, only raw UUIDs (or, with the bug
- * above, the string "undefined"), and had no way to honor the system
- * prompt's own instruction to cite as "[Doc: filename, p.N]". Fetching
- * once and sharing the map also removes a duplicate DB round-trip.
- */
 export async function fetchDocumentNameMap(
   chunks: RetrievedChunk[],
   supabase: SupabaseClient,
@@ -303,14 +223,6 @@ export async function fetchDocumentNameMap(
 
 // ─── buildSystemPrompt ────────────────────────────────────────────────────────
 
-/**
- * Build the system prompt with injected context chunks.
- * Context is formatted as numbered blocks so the model can cite precisely.
- *
- * FIX #11 (continued): now takes docNameMap so the "Document:" label shown
- * to the model is an actual filename — matching what the rules below ask
- * it to cite as — instead of a raw UUID (or "undefined", pre-FIX #11).
- */
 export function buildSystemPrompt(
   chunks: RetrievedChunk[],
   docNameMap: Record<string, string>,
@@ -337,16 +249,6 @@ ${contextBlocks || "No context available."}`;
 
 // ─── buildSourceCitations ─────────────────────────────────────────────────────
 
-/**
- * Convert retrieved chunks into SourceCitation objects for the SSE
- * 'sources' event.
- *
- * FIX #11 (continued): now takes the pre-fetched docNameMap instead of a
- * supabase client, and is synchronous — the DB round-trip happens once,
- * earlier, in fetchDocumentNameMap, shared with buildSystemPrompt. If
- * anything else in the codebase calls buildSourceCitations with the old
- * (chunks, supabase) signature, it'll need updating to this one.
- */
 export function buildSourceCitations(
   chunks: RetrievedChunk[],
   docNameMap: Record<string, string>,

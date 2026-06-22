@@ -1,6 +1,3 @@
-// FILE: apps/web/app/not-found.tsx
-// Rendered automatically by Next.js for any unmatched route.
-
 import Link from "next/link";
 
 export default function NotFound() {

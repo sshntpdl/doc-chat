@@ -1,5 +1,3 @@
-// FILE: /packages/stores/src/chatStore.ts
-
 import { create } from "zustand";
 import { devtools } from "zustand/middleware";
 import { subscribeWithSelector } from "zustand/middleware";
@@ -20,17 +18,11 @@ import { getApiBase } from "./apiBase";
 
 /**
  * Per-document pagination state for the session list sidebar.
- * Tracks the cursor (created_at of the last loaded session) and
- * whether more pages exist.
  */
 interface SessionPagination {
-  /** ISO-8601 cursor for the next page. null = haven't fetched yet. */
   nextCursor: string | null;
-  /** False until the first fetch completes. */
   hasFetched: boolean;
-  /** True when more pages exist on the server. */
   hasMore: boolean;
-  /** True while a fetch is in flight (prevents concurrent requests). */
   isFetching: boolean;
 }
 
@@ -42,7 +34,6 @@ interface ChatState {
   error: AppError | null;
   /**
    * Per-document pagination cursors.
-   * Key = documentId, Value = pagination state for that document's session list.
    */
   sessionPagination: Record<string, SessionPagination>;
 }
@@ -50,25 +41,11 @@ interface ChatState {
 interface ChatActions {
   /**
    * ensureSessionForDocument — called by ChatPage on every documentId change.
-   *
-   * Decision tree:
-   *   A) Active session already belongs to this document → do nothing.
-   *   B) An existing EMPTY session for this document exists → activate it.
-   *   C) No suitable session → create a new one.
-   *
-   * Also kicks off the initial session list fetch if not yet loaded.
    */
   ensureSessionForDocument(documentId: string): void;
 
   /**
    * requestNewChat — called by the "+ New Chat" button.
-   *
-   * Decision tree (same logic as Claude / ChatGPT / Gemini):
-   *   A) Active session is already empty → do nothing (just return its id).
-   *   B) An existing OTHER empty session for this document exists → activate it.
-   *   C) No empty session → create a fresh one and prune other blank sessions.
-   *
-   * Returns the session id that ended up active.
    */
   requestNewChat(documentId: string): string;
 
@@ -77,14 +54,6 @@ interface ChatActions {
 
   /**
    * fetchSessions — loads the next page of sessions for a document.
-   *
-   * Call this:
-   *   - On initial load (called automatically by ensureSessionForDocument)
-   *   - When the user scrolls to the bottom of the session list
-   *
-   * The function is a no-op when:
-   *   - A fetch is already in flight for that document
-   *   - There are no more pages to load
    */
   fetchSessions(documentId: string): Promise<void>;
 
@@ -104,11 +73,6 @@ interface ChatActions {
   setActiveSession(sessionId: string | null): void;
   clearError(): void;
   _reset(): void;
-  /**
-   * _handleSSEEvent — process a single SSE event.
-   *
-   * Returns the effective session ID to use for subsequent events.
-   */
   _handleSSEEvent(
     sessionId: string,
     messageId: string,
@@ -129,16 +93,6 @@ function newSessionId() {
   return `session_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-/**
- * deriveTitle — turns the first user message of a session into a short
- * display title, the same way ChatGPT/Claude/Gemini show a placeholder
- * title immediately instead of waiting on a round-trip to the server.
- *
- * Exported so non-store call sites (e.g. the mobile chat screen, which
- * streams via its own EventSource implementation instead of going through
- * `sendMessage()`) can apply the exact same optimistic title logic instead
- * of leaving sessions stuck at "New Chat".
- */
 export function deriveTitle(content: string): string {
   const trimmed = content.trim().replace(/\s+/g, " ");
   return trimmed.length > 40 ? trimmed.slice(0, 40) + "…" : trimmed;
@@ -159,9 +113,7 @@ function isLocalTempId(id: string): boolean {
 
 /**
  * getAuthToken — reads the current Supabase access token directly from
- * authStore so every chatStore network call can authenticate on mobile,
- * where there's no cookie jar (mirrors the Bearer-token pattern already
- * used by the streaming /api/chat call).
+ * authStore.
  */
 function getAuthToken(): string | undefined {
   return useAuthStore.getState().session?.access_token;
@@ -314,28 +266,6 @@ export const useChatStore = create<ChatStore>()(
 
               set((s) => {
                 for (const session of incoming) {
-                  // Only add sessions the client doesn't already know
-                  // about. A session already present locally is either
-                  // the active session (created client-side and possibly
-                  // already renamed from a local temp id to its server id
-                  // — see the SSE "start" handling in sendMessage /
-                  // _handleSSEEvent) or one whose full message history is
-                  // already loaded; in both cases `messages` / `isLoaded`
-                  // must be left alone. We DO sync `title`, since the DB
-                  // row is the source of truth for it and the client may
-                  // only have an optimistic guess.
-                  //
-                  // NOTE: we deliberately do NOT sync `createdAt` here.
-                  // Doing so previously let an already-rendered session's
-                  // sort position shift on a later fetch (e.g. paging in
-                  // more history, or a remount re-syncing page 1), which
-                  // reorders the sidebar list while it may be open and
-                  // makes it possible to tap a different row than the one
-                  // the user intended. `createdAt` only ever affects sort
-                  // order here, and the client's locally-recorded value
-                  // (set at the moment of creation) is a perfectly stable
-                  // sort key for as long as the session lives in this
-                  // client — there's no need to chase the server's value.
                   const local = s.sessions[session.id];
 
                   if (!local) {
@@ -354,13 +284,6 @@ export const useChatStore = create<ChatStore>()(
                 };
               });
             } catch (err) {
-              // Still flip `hasFetched` to true here. Previously this branch
-              // only cleared `isFetching`, so a failed request (e.g. a 401
-              // from a missing/expired auth token) left `hasFetched` stuck
-              // at `false` forever — which is what kept the sidebar showing
-              // its skeleton indefinitely instead of falling back to an
-              // empty/error state. `hasMore` is left untouched so the next
-              // call to fetchSessions (e.g. re-opening the sidebar) retries.
               set((s) => {
                 if (!s.sessionPagination[documentId]) {
                   s.sessionPagination[documentId] = { ...DEFAULT_PAGINATION };
@@ -399,13 +322,10 @@ export const useChatStore = create<ChatStore>()(
                 s.id !== activeSessionId,
             );
             if (existingEmpty) {
-              // Don't call setActiveSession here — let the caller do it
-              // so we avoid the double-render in the old code path
               return existingEmpty.id;
             }
 
             // C) No empty session for this document → create one fresh
-            // Prune OTHER empty sessions for this document to avoid accumulation
             const id = newSessionId();
             set((s) => {
               for (const sid of Object.keys(s.sessions)) {
@@ -417,9 +337,6 @@ export const useChatStore = create<ChatStore>()(
                 }
               }
               s.sessions[id] = makeNewSession(id, documentId);
-              // NOTE: do NOT set activeSessionId here — caller sets it explicitly
-              // This prevents the double-render where old activeSessionId persists
-              // for one frame after the effect fires.
             });
             return id;
           },
@@ -593,7 +510,6 @@ export const useChatStore = create<ChatStore>()(
                         ...existing,
                         id: event.sessionId,
                         title: localTitle,
-                        // Mark as truly loaded now that the server has confirmed it
                         isLoaded: true,
                       };
                       delete s.sessions[sessionId];
@@ -732,13 +648,6 @@ export function useCurrentMessages(sessionId: string | null) {
   );
 }
 
-/**
- * useSessionList — returns sessions for a document sorted newest-first,
- * the active-session-is-empty flag, pagination loading state, and a
- * loadMore callback — all as a single stable object.
- *
- * Used exclusively by ChatSidebar so it has one place to subscribe.
- */
 export function useSessionList(documentId: string) {
   return useChatStore(
     useShallow((s) => {
@@ -751,20 +660,6 @@ export function useSessionList(documentId: string) {
             (!sess.documentId && documentId === ""),
         )
         .sort((a, b) => {
-          // Pin a brand-new, never-sent "draft" session to the very top
-          // whenever it's the active one. Its createdAt is "now" so it
-          // would almost always win this comparison anyway — this is a
-          // deterministic guarantee on top of that, independent of any
-          // clock-skew edge case, so the conversation currently on screen
-          // is always easy to find rather than depending purely on
-          // timestamp comparison.
-          //
-          // We deliberately do NOT pin already-persisted conversations
-          // (sessions that have messages). Doing so would re-sort the
-          // list out of its normal chronological order every time the
-          // user switches between two existing chats — exactly the kind
-          // of mid-interaction reordering that makes a tap land on the
-          // wrong row.
           const aIsActiveDraft = a.id === activeId && a.messages.length === 0;
           const bIsActiveDraft = b.id === activeId && b.messages.length === 0;
           if (aIsActiveDraft && !bIsActiveDraft) return -1;

@@ -1,16 +1,4 @@
-// FILE: apps/web/app/chat/[documentId]/page.tsx
 "use client";
-//
-// CHANGES vs v4:
-//
-// 1. isLoadingHistory state — tracks when loadHistory() is in-flight for a
-//    selected old session. While true, the message area shows a skeleton
-//    loader instead of SuggestedQuestions. SuggestedQuestions is now only
-//    shown when the active session is genuinely new (isEmpty AND not loading).
-//
-// 2. handleSelectSession — sets isLoadingHistory = true before awaiting
-//    loadHistory(), clears it after. setActiveSession still fires immediately
-//    for snappy sidebar highlighting.
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "next/navigation";
@@ -57,7 +45,6 @@ export default function ChatPage() {
   const [input, setInput] = useState<string>("");
 
   // True only while loadHistory() is awaiting for a selected old session.
-  // Cleared immediately once the fetch settles (success or error).
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
 
   // ── Effects ───────────────────────────────────────────────────────────────
@@ -95,9 +82,6 @@ export default function ChatPage() {
   /**
    * handleSelectSession — activates the session immediately for snappy sidebar
    * highlighting, then lazy-loads the message history if this is a stub session.
-   *
-   * While loadHistory() is in-flight, isLoadingHistory = true so the message
-   * area renders a skeleton instead of the empty-state suggested questions.
    */
   const handleSelectSession = useCallback(
     async (id: string) => {
@@ -131,8 +115,6 @@ export default function ChatPage() {
   const isEmpty = messages.length === 0;
 
   // Show suggested questions only for genuinely new (empty + not loading) sessions.
-  // While loading an old session's history, isEmpty is temporarily true — we must
-  // not flash the suggested questions UI in that window.
   const showSuggestions = isEmpty && !isLoadingHistory;
 
   // ── Render ────────────────────────────────────────────────────────────────

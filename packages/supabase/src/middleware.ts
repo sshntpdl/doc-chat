@@ -15,7 +15,6 @@ interface SessionUpdateResult {
 export async function updateSession(
   request: NextRequest,
 ): Promise<SessionUpdateResult> {
-  // Start with a pass-through response that forwards the original headers.
   let response = NextResponse.next({
     request: { headers: request.headers },
   });
@@ -36,10 +35,8 @@ export async function updateSession(
       },
 
       set(name: string, value: string, options: CookieOptions): void {
-        // Write the updated cookie onto the request so subsequent middleware
         request.cookies.set(name, value);
 
-        // Recreate the response so the Set-Cookie header is included.
         response = NextResponse.next({
           request: { headers: request.headers },
         });

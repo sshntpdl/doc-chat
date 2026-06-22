@@ -1,17 +1,9 @@
-/* FILE: /apps/web/app/globals.css */
 /*
  * Tailwind CSS v3 directives.
- * These three lines inject Tailwind's base reset, component classes,
- * and utility classes. Replace the @import "tailwindcss" v4 syntax.
  */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-/* ─── DESIGN SYSTEM — CSS Custom Properties ──────────────────────────────── */
-/* All color/spacing/shadow tokens live here as CSS variables.                */
-/* Components reference these via var(--color-*) instead of hardcoded values, */
-/* so switching themes is a single class toggle on <html>.                    */
 
 /* ─── LIGHT MODE ─────────────────────────────────────────────────────────── */
 :root {

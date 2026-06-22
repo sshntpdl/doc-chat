@@ -1,5 +1,3 @@
-// FILE: /packages/stores/src/documentStore.ts
-
 import { create } from "zustand";
 import { devtools } from "zustand/middleware";
 import { immer } from "zustand/middleware/immer";
@@ -31,11 +29,7 @@ interface DocumentActions {
   deleteDocument(id: string, token?: string): Promise<void>;
   /**
    * cancelUpload — aborts an in-flight upload XHR and removes the item
-   * from the queue immediately.
-   *
-   * Safe to call at any point during "uploading" or "processing" status.
-   * If the XHR has already completed (status = "ready" | "error") the abort
-   * is a no-op and the item is still removed from the queue.
+   * from the queue immediately..
    */
   cancelUpload(tempId: string): void;
   getDocumentById(id: string): Document | undefined;
@@ -75,14 +69,9 @@ function authHeaders(token?: string): Record<string, string> {
 }
 
 // ─── XHR ABORT REGISTRY ───────────────────────────────────────────────────────
-// Kept outside Zustand state (not serialisable / not needed for rendering).
-// Maps tempId → the live XHR so cancelUpload() can abort it.
 const xhrRegistry = new Map<string, XMLHttpRequest>();
 
 // ─── POLL CANCELLATION ────────────────────────────────────────────────────────
-// When a user cancels during the "processing" phase we need to stop the
-// polling loop. A simple Set of cancelled tempIds achieves this without
-// needing AbortController on setInterval.
 const cancelledUploads = new Set<string>();
 
 // ─── STORE ────────────────────────────────────────────────────────────────────
@@ -279,7 +268,6 @@ export const useDocumentStore = create<DocumentStore>()(
 
             xhr.onabort = () => {
               xhrRegistry.delete(tempId);
-              // Queue item already removed by cancelUpload() — just resolve.
               resolve();
             };
 
@@ -394,7 +382,6 @@ export const useDocumentStore = create<DocumentStore>()(
 
             xhr.onabort = () => {
               xhrRegistry.delete(tempId);
-              // Queue item already removed by cancelUpload() — just resolve.
               resolve();
             };
 
@@ -434,8 +421,7 @@ export const useDocumentStore = create<DocumentStore>()(
 
               if (!res.ok) continue;
 
-              // Check again after the await — user may have cancelled while
-              // the fetch was in flight.
+              // Check again after the await
               if (cancelledUploads.has(tempId)) {
                 cancelledUploads.delete(tempId);
                 return;
@@ -461,7 +447,6 @@ export const useDocumentStore = create<DocumentStore>()(
                 });
                 return;
               }
-              // Still "processing" — keep polling
             } catch {
               continue;
             }

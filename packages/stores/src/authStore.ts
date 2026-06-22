@@ -1,12 +1,3 @@
-// FILE: /packages/stores/src/authStore.ts
-//
-// KEY CHANGE in signInWithEmail:
-// After a successful signInWithPassword, we POST the tokens to
-// /api/auth/set-session. That server route uses @supabase/ssr's server
-// client to write the session cookies in the correct chunked format.
-// Only after that succeeds do we update the store and let the login
-// page navigate. This guarantees middleware sees a valid session.
-
 import { create } from "zustand";
 import { devtools } from "zustand/middleware";
 import { immer } from "zustand/middleware/immer";
@@ -52,6 +43,14 @@ export function clearAllStores() {
   storeResetFns.forEach((fn) => fn());
 }
 
+declare const process: {
+  env: {
+    EXPO_PUBLIC_API_URL?: string;
+    NEXT_PUBLIC_APP_URL?: string;
+    [key: string]: string | undefined;
+  };
+};
+
 export const useAuthStore = create<AuthStore>()(
   devtools(
     immer((set, get) => ({
@@ -75,8 +74,6 @@ export const useAuthStore = create<AuthStore>()(
           });
 
           // INITIAL_SESSION fires synchronously above with the current session.
-          // We still call getSession() so isInitialized is set even if the
-          // onAuthStateChange listener fires before the set() call processes.
           const {
             data: { session },
           } = await supabase.auth.getSession();
@@ -157,9 +154,7 @@ export const useAuthStore = create<AuthStore>()(
           }
 
           // Step 2: POST tokens to our server route so @supabase/ssr writes
-          // the cookies in its own chunked format. The browser client (with
-          // persistSession: false) does NOT write cookies itself — only the
-          // server route does. This eliminates the format mismatch.
+          // the cookies in its own chunked format..
           const res = await fetch("/api/auth/set-session", {
             method: "POST",
             headers: { "Content-Type": "application/json" },

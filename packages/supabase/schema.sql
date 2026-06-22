@@ -1,7 +1,3 @@
--- FILE: /packages/supabase/schema.sql
--- Run this in Supabase SQL Editor (Dashboard → SQL Editor → New Query)
--- Execute in order — later sections depend on earlier ones.
-
 -- ─────────────────────────────────────────────────────────────────────────────
 -- EXTENSIONS
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -15,8 +11,6 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- ─────────────────────────────────────────────────────────────────────────────
 -- UTILITY: updated_at TRIGGER
 -- ─────────────────────────────────────────────────────────────────────────────
--- Reused across all tables that track updates. A trigger is more reliable
--- than application-layer timestamps because DB writes bypass the app.
 
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
@@ -29,8 +23,6 @@ $$ LANGUAGE plpgsql;
 -- ─────────────────────────────────────────────────────────────────────────────
 -- TABLE: profiles
 -- ─────────────────────────────────────────────────────────────────────────────
--- Extends Supabase's built-in auth.users table.
--- We never store auth data here — only display preferences.
 
 CREATE TABLE IF NOT EXISTS public.profiles (
   id          UUID        PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -89,9 +81,6 @@ CREATE TRIGGER documents_updated_at
 -- ─────────────────────────────────────────────────────────────────────────────
 -- TABLE: document_chunks
 -- ─────────────────────────────────────────────────────────────────────────────
--- Each row is one 800-character text chunk from a document.
--- The `embedding` column stores the 384-dim MiniLM vector.
--- 384 dims (not 1536!) — all-MiniLM-L6-v2 outputs 384-dimensional vectors.
 
 CREATE TABLE IF NOT EXISTS public.document_chunks (
   id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -109,8 +98,6 @@ CREATE INDEX IF NOT EXISTS chunks_user_id_idx      ON public.document_chunks (us
 CREATE INDEX IF NOT EXISTS chunks_document_id_idx  ON public.document_chunks (document_id);
 
 -- IVFFlat index for approximate nearest-neighbor vector search.
--- lists=100 is appropriate for up to ~1M rows. Rebuild with more lists
--- as the dataset grows. IMPORTANT: build AFTER initial data load.
 CREATE INDEX IF NOT EXISTS chunks_embedding_idx
   ON public.document_chunks
   USING ivfflat (embedding vector_cosine_ops)
@@ -149,8 +136,6 @@ CREATE TABLE IF NOT EXISTS public.chat_messages (
   user_id     UUID        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   role        TEXT        NOT NULL CHECK (role IN ('user', 'assistant')),
   content     TEXT        NOT NULL,
-  -- sources: SourceCitation[] JSON array (only on assistant messages)
-  -- Example: [{ documentId, documentName, pageNumber, snippet, similarity }]
   sources     JSONB,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -163,16 +148,6 @@ CREATE INDEX IF NOT EXISTS messages_created_at_idx  ON public.chat_messages (ses
 -- ─────────────────────────────────────────────────────────────────────────────
 -- PGVECTOR FUNCTION: match_chunks
 -- ─────────────────────────────────────────────────────────────────────────────
--- Called by the Route Handler after embedding the user's question.
--- Returns the K nearest chunks ordered by cosine similarity (highest first).
---
--- Parameters:
---   query_embedding    — the embedded user question (384 dims)
---   match_user_id      — RLS equivalent at function level (defense in depth)
---   match_count        — how many chunks to return (default 4 in app code)
---   filter_document_id — pass a UUID to scope search to one document,
---                        pass NULL to search all user documents
-
 CREATE OR REPLACE FUNCTION public.match_chunks(
   query_embedding    vector(384),
   match_user_id      uuid,
@@ -214,8 +189,6 @@ $$;
 -- ─────────────────────────────────────────────────────────────────────────────
 -- ROW LEVEL SECURITY
 -- ─────────────────────────────────────────────────────────────────────────────
--- RLS is the primary data isolation guard. Even if application code has a bug
--- that passes the wrong user_id, Supabase will block the query at the DB level.
 
 -- Enable RLS on every table
 ALTER TABLE public.profiles       ENABLE ROW LEVEL SECURITY;

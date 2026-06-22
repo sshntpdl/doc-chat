@@ -1,0 +1,23 @@
+# Dependency folders (EAS will install these fresh in the cloud)
+
+node_modules/
+apps/mobile/node_modules/
+apps/web/node_modules/
+
+# Local build outputs and caches
+
+dist/
+build/
+.turbo/
+.next/
+.expo/
+
+# Native build folders if any exist locally
+
+apps/mobile/ios/
+apps/mobile/android/
+
+# System files & Logs
+
+.DS_Store
+\*.log

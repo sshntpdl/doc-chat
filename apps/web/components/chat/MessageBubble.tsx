@@ -1,4 +1,3 @@
-// FILE: apps/web/components/chat/MessageBubble.tsx
 "use client";
 
 import { useState, memo, useMemo } from "react";
@@ -64,8 +63,6 @@ function StreamingCursor() {
 }
 
 // ─── INLINE CITATION NUMBER BADGE ────────────────────────────────────────────
-// Renders a small superscript number badge matching the mobile UI.
-// Each unique citation gets a sequential number (1-based) within the message.
 
 function CitationBadge({
   number,
@@ -97,35 +94,6 @@ function CitationBadge({
 }
 
 // ─── CITATION SEGMENT SPLITTER ────────────────────────────────────────────────
-//
-// WHY NOT use ReactMarkdown's `components` API for this?
-//
-// We tried three approaches that all failed in react-markdown v9 + remark-gfm v4:
-//
-//  1. `components.text` → removed entirely in v9
-//  2. `[filename|page](doc-citation)` links → remark-gfm v4 parses `|` inside
-//     link text as GFM table column separators, breaking the link
-//  3. `[page](doc-citation://filename/page)` links → rehype sanitizes unknown
-//     protocols, stripping the href so it arrives as `undefined` in `components.a`,
-//     causing the link to render as plain text ("p.2")
-//
-// SOLUTION: split the raw content string on citation patterns BEFORE it reaches
-// ReactMarkdown. Each piece is either a plain markdown string (rendered normally)
-// or a citation object (rendered as <CitationBadge> directly in React).
-// No markdown tricks needed — citations never enter the markdown pipeline at all.
-//
-// NUMBERING: each [Doc: filename, p.X] token resolves to a 1-based number by
-// matching it against the message's sources[] array (documentName + pageNumber).
-//
-// WHY THIS APPROACH:
-//   If the same source is cited 5 times (e.g. all bullets reference sources[0]),
-//   a positional counter would produce badges 1–5 even though only 1 source exists.
-//   The user would see "5 sources" in the list but only 1 entry — confusing.
-//
-//   By looking up filename+page in sources[], repeated references to the same
-//   source all show the same badge number (e.g. all "1"), and the number
-//   displayed in the badge always equals the row number in the SourceCitation list.
-
 import type { SourceCitation as CitationSource } from "@docchat/types";
 
 type TextSegment = { type: "text"; content: string };
@@ -133,7 +101,6 @@ type CitationSegment = {
   type: "citation";
   filename: string;
   page: string;
-  /** 1-based index into sources[] — same source always gets the same number */
   number: number;
 };
 type Segment = TextSegment | CitationSegment;
@@ -141,8 +108,7 @@ type Segment = TextSegment | CitationSegment;
 const DOC_CITATION_RE = /\[Doc:\s*([^\],]+?),\s*(p\.[\d–\-,\s]+?)\]/g;
 
 /**
- * Build a lookup map: "normalised documentName||pageNumber" → 1-based index.
- * Normalised = lowercased + trimmed to absorb minor casing/spacing differences.
+ * Build a lookup map: "normalised documentName||pageNumber"
  */
 function buildSourceIndexMap(
   sources: CitationSource[] | undefined,
@@ -194,8 +160,6 @@ function splitIntoCitationSegments(
 }
 
 // ─── SHARED MARKDOWN COMPONENTS ──────────────────────────────────────────────
-// Defined outside the component so the reference is stable across renders
-// (prevents ReactMarkdown from remounting on every token during streaming).
 
 const markdownComponents = {
   pre({ children, ...props }: any) {
@@ -216,9 +180,6 @@ const markdownComponents = {
 };
 
 // ─── AI MESSAGE BODY ─────────────────────────────────────────────────────────
-// Renders segments: markdown text pieces interspersed with citation number badges.
-// Each text segment gets its own <ReactMarkdown> instance so the prose
-// styles and GFM features apply normally within each chunk.
 
 interface AIBodyProps {
   content: string;
@@ -232,8 +193,6 @@ function AIMessageBody({ content, isReceivingTokens, sources }: AIBodyProps) {
     return splitIntoCitationSegments(content, sourceIndexMap);
   }, [content, sources]);
 
-  // Find the index of the last text segment so we can attach the
-  // streaming cursor to it (not to a trailing citation badge).
   const lastTextIdx = segments.reduce<number>(
     (last, seg, i) => (seg.type === "text" ? i : last),
     -1,
@@ -257,15 +216,11 @@ function AIMessageBody({ content, isReceivingTokens, sources }: AIBodyProps) {
         const isLastText = i === lastTextIdx;
 
         return (
-          // `contents` makes the span not create a new block box, so the
-          // trailing citation badge stays inline with the preceding text.
           <span key={i} className="contents">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
                 ...markdownComponents,
-                // Inject streaming cursor after the last paragraph of the
-                // last text segment while tokens are still arriving.
                 p({ children, ...props }: any) {
                   return (
                     <p {...props}>

@@ -1,7 +1,3 @@
-// FILE: apps/web/components/ui/Button.tsx
-// Reusable button with variant, size, and loading state support.
-// Used across login form, upload zone, document cards, and chat input.
-
 import { forwardRef, type ButtonHTMLAttributes } from "react";
 
 type Variant = "primary" | "secondary" | "destructive" | "ghost" | "outline";
@@ -15,9 +11,7 @@ interface ButtonProps extends Omit<
   variant?: Variant;
   size?: Size;
   isLoading?: boolean;
-  /** Icon shown to the left of children */
   leftIcon?: React.ReactNode;
-  /** Icon shown to the right of children */
   rightIcon?: React.ReactNode;
   fullWidth?: boolean;
   style?: any;

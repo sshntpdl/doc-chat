@@ -1,13 +1,8 @@
-// FILE: apps/web/components/ui/Badge.tsx
-// Status badge used on DocumentCards and anywhere a small coloured label is needed.
-// Variant maps directly to the semantic color tokens in globals.css.
-
 type BadgeVariant = "success" | "warning" | "error" | "info" | "default";
 
 interface BadgeProps {
   children: React.ReactNode;
   variant?: BadgeVariant;
-  /** Pulsing animation — used for "Processing" status */
   pulse?: boolean;
   className?: string;
 }
@@ -45,8 +40,6 @@ export function Badge({
 }
 
 // ─── DOCUMENT STATUS BADGE ───────────────────────────────────────────────────
-// Convenience wrapper that maps DocumentStatus → Badge variant automatically.
-
 import type { DocumentStatus } from "@docchat/types";
 
 const STATUS_MAP: Record<
