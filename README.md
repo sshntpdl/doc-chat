@@ -1,272 +1,223 @@
-# DocChat — AI Document Q&A System
+<div align="center">
 
-Full-stack AI application: upload PDFs → chat with them → get cited answers.
+# 📄 DocChat
+
+**Chat with your documents using AI — upload PDFs, ask questions, get cited answers.**
+
+[![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org)
+[![Expo](https://img.shields.io/badge/Expo-SDK%2051-000020?logo=expo)](https://expo.dev)
+[![Supabase](https://img.shields.io/badge/Supabase-pgvector-3ECF8E?logo=supabase)](https://supabase.com)
+[![Groq](https://img.shields.io/badge/Groq-LLaMA%203.3-F55036)](https://groq.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+[Web App](#) · [Report Bug](issues) · [Request Feature](issues)
+
+</div>
 
 ---
 
-## ARCHITECTURE OVERVIEW
+## ✨ What is DocChat?
+
+DocChat is a full-stack AI application that lets you **upload PDF documents and have conversations with them**. Ask questions in plain English and get accurate, cited answers pulled directly from your documents — available on both web and mobile.
+
+---
+
+## 📸 Screenshots
+
+### Web App
+
+| Landing                                        | Login                                   |
+| ---------------------------------------------- | --------------------------------------- |
+| ![Dashboard](docs/screenshots/web-landing.png) | ![Chat](docs/screenshots/web-login.png) |
+
+| Dashboard                                        | Chat Interface                         |
+| ------------------------------------------------ | -------------------------------------- |
+| ![Dashboard](docs/screenshots/web-dashboard.png) | ![Chat](docs/screenshots/web-chat.png) |
+
+| Upload Flow |
+| ----------- |
+
+| ![Upload](docs/screenshots/web-document-upload.png)
+
+### Mobile App (React Native)
+
+| Login                                                            | Dashboard                                              | Chat                                              |
+| ---------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------- |
+| ![Login](docs/screenshots/mobile-login.png)                      | ![Dashboard](docs/screenshots/mobile-dashboard.png)    | ![Chat](docs/screenshots/mobile-chat.png)         |
+| Upload Document                                                  | Upload Tracker                                         | New Chat                                          |
+| --------------------------------------                           | -----------------------------------------              | ------------------------------------              |
+| ![Upload Document](docs/screenshots/mobile-upload.png)           | ![Upload Tracker](docs/screenshots/upload-tracker.png) | ![New Chat](docs/screenshots/mobile-new-chat.png) |
+| Mobile Chat Sidebar                                              |
+| --------------------------------------                           |
+| ![Mobile Chat Sidebar](docs/screenshots/mobile-chat-history.png) |
+
+---
+
+## 🔄 User Flow
 
 ```
-╔══════════════════════════════════════════════════════════════════════════╗
-║                        CLIENT LAYER                                      ║
-║                                                                          ║
-║   ┌─────────────────────────┐    ┌─────────────────────────────────┐    ║
-║   │   Next.js Web Browser   │    │  React Native (Expo SDK 51)     │    ║
-║   │   /apps/web             │    │  /apps/mobile                   │    ║
-║   │                         │    │                                 │    ║
-║   │  Server Components      │    │  Expo Router v3                 │    ║
-║   │  Client Components      │    │  NativeWind v4 (Tailwind→RN)   │    ║
-║   │  Tailwind CSS v4        │    │  react-native-sse (EventSource) │    ║
-║   │  shadcn/ui              │    │  expo-secure-store (tokens)     │    ║
-║   └────────────┬────────────┘    └───────────────┬─────────────────┘    ║
-║                │                                 │                       ║
-║         ┌──────▼─────────────────────────────────▼──────┐               ║
-║         │           /packages (shared workspace)         │               ║
-║         │                                                │               ║
-║         │  @docchat/types    — AppError, Document,       │               ║
-║         │                      ChatMessage, SSEEvent     │               ║
-║         │  @docchat/supabase — createBrowserClient()     │               ║
-║         │                      createServerClient()      │               ║
-║         │  @docchat/stores   — useAuthStore (Zustand)    │               ║
-║         │                      useDocumentStore          │               ║
-║         │                      useChatStore              │               ║
-║         │                      useUIStore                │               ║
-║         └──────────────────────────────────────────────-─┘               ║
-╚══════════════════════════════════════════════════════════════════════════╝
-                    │                           │
-         HTTP REST  │                      SSE / REST
-       (cookies/JWT)│                   (Authorization: Bearer)
-                    │                           │
-╔══════════════════▼═══════════════════════════▼═════════════════════════╗
-║                  NEXT.JS ROUTE HANDLERS (the backend)                   ║
-║                  /apps/web/app/api/**                                   ║
-║                                                                         ║
-║   POST /api/ingest          ←── multipart/form-data (PDF/MD file)      ║
-║   GET  /api/documents       ←── bearer token / cookie                  ║
-║   GET  /api/documents/:id   ←── bearer token / cookie                  ║
-║   DELETE /api/documents/:id ←── bearer token / cookie                  ║
-║   POST /api/chat            ←── JSON body → SSE stream (tokens)        ║
-║   GET  /api/chat/history/:id ←── bearer token / cookie                 ║
-║   GET  /api/auth/callback   ←── Supabase OAuth redirect                ║
-║                                                                         ║
-║   ┌────────────────────────────────────────────────────────────────┐    ║
-║   │              _lib/ (shared Route Handler utilities)            │    ║
-║   │                                                                │    ║
-║   │  auth.ts       — getAuthenticatedUser() cookie+header dual     │    ║
-║   │  response.ts   — successResponse / errorResponse / SSE stream  │    ║
-║   │  ratelimit.ts  — token bucket Map (30/min chat, 10/hr ingest)  │    ║
-║   │  langchain.ts  — Groq + HuggingFace singletons, retrieveChunks │    ║
-║   └────────────────────────────────────────────────────────────────┘    ║
-║                                                                         ║
-║   ┌────────────────────── LangChain.js ────────────────────────────┐    ║
-║   │                                                                │    ║
-║   │  INGEST PIPELINE:                                              │    ║
-║   │  File Buffer → pdf-parse/toString → RecursiveCharacterSplitter │    ║
-║   │  (chunkSize:800, overlap:150) → HF Embeddings (batch/10) →     │    ║
-║   │  pgvector INSERT                                               │    ║
-║   │                                                                │    ║
-║   │  QUERY PIPELINE:                                               │    ║
-║   │  question → embedQuery → match_chunks RPC → buildSystemPrompt  │    ║
-║   │  → ChatPromptTemplate → ChatGroq.stream() → SSE tokens →       │    ║
-║   │  buildSourceCitations → SSE sources event                      │    ║
-║   └────────────────────────────────────────────────────────────────┘    ║
-╚═══════════════════╤══════════════════════════════╤═══════════════════════╝
-                    │                              │
-         ┌──────────▼──────────┐        ┌─────────▼──────────────┐
-         │   SUPABASE          │        │  EXTERNAL AI APIS      │
-         │                     │        │                        │
-         │  Auth (JWT/Magic)   │        │  HuggingFace API       │
-         │  PostgreSQL         │        │  sentence-transformers │
-         │  pgvector (384 dim) │        │  /all-MiniLM-L6-v2    │
-         │                     │        │  → 384-dim embeddings  │
-         │  Tables:            │        │                        │
-         │  profiles           │        │  Groq API              │
-         │  documents          │        │  llama-3.3-70b-        │
-         │  document_chunks    │        │  versatile             │
-         │  chat_sessions      │        │  → streaming tokens    │
-         │  chat_messages      │        │                        │
-         │                     │        │  (Both free tier)      │
-         │  RLS on every table │        └────────────────────────┘
-         └─────────────────────┘
+1. Sign up / Log in
+        │
+        ▼
+2. Upload a PDF (drag & drop on web, file picker on mobile)
+        │
+        ▼
+3. Wait ~5–15 seconds while the document is processed
+   (chunked → embedded → stored in pgvector)
+        │
+        ▼
+4. Open the chat for your document
+        │
+        ▼
+5. Ask any question in plain English
+        │
+        ▼
+6. Get a streaming AI response with source citations
+   showing exactly which part of your document it came from
 ```
 
 ---
 
-## FLOW A — DOCUMENT INGEST
+## 🛠️ Tech Stack
 
-```
-User uploads PDF
-      │
-      ▼ (1) multipart/form-data POST /api/ingest
-Route Handler: getAuthenticatedUser()   ← validates JWT from cookie or header
-      │
-      ▼ (2) rateLimiter(userId, 'ingest', 10, 3600000)
-      │
-      ▼ (3) Validate: MIME type, size ≤10MB, not empty
-      │
-      ▼ (4) INSERT documents row (status: 'processing')
-      │
-      ▼ (5) pdf-parse(buffer) → text + page count
-      │         OR buffer.toString() for .txt/.md
-      │
-      ▼ (6) RecursiveCharacterTextSplitter
-      │         chunkSize: 800 chars (~200 tokens)
-      │         overlap:   150 chars
-      │         → string[] of ~N chunks
-      │
-      ▼ (7) FOR each batch of 10 chunks:
-      │         HuggingFaceInferenceEmbeddings.embedDocuments(batch)
-      │         → number[][] (384-dim vectors)
-      │         await 500ms  ← respect HF free tier rate limit
-      │
-      ▼ (8) INSERT document_chunks (content, metadata, embedding)
-      │
-      ▼ (9) UPDATE documents SET status='ready', chunk_count=N
-      │
-      ▼ (10) return { documentId, status, chunkCount }
-      │
-Client polls GET /api/documents/:id every 2s until status='ready'
+### Frontend — Web
+
+| Layer     | Technology                                                                |
+| --------- | ------------------------------------------------------------------------- |
+| Framework | [Next.js 15](https://nextjs.org) (App Router, Server + Client Components) |
+| Styling   | Tailwind CSS                                                              |
+| State     | Zustand                                                                   |
+
+### Frontend — Mobile
+
+| Layer      | Technology              |
+| ---------- | ----------------------- |
+| Framework  | Expo SDK + React Native |
+| Navigation | Expo Router             |
+
+### Backend (Next.js Route Handlers)
+
+| Layer        | Technology                                                                    |
+| ------------ | ----------------------------------------------------------------------------- |
+| AI / LLM     | [Groq API](https://groq.com) — LLaMA 3.3 70B (free tier)                      |
+| Embeddings   | [HuggingFace](https://huggingface.co) — all-MiniLM-L6-v2 (384-dim, free tier) |
+| RAG pipeline | LangChain.js                                                                  |
+| Streaming    | Server-Sent Events (SSE)                                                      |
+
+### Infrastructure
+
+| Layer    | Technology                                               |
+| -------- | -------------------------------------------------------- |
+| Database | [Supabase](https://supabase.com) — PostgreSQL + pgvector |
+| Auth     | Supabase Auth (Email/Password + Magic Link)              |
+| Monorepo | Turborepo + npm workspaces                               |
+
+---
+
+## 🚀 Running Locally
+
+### Prerequisites
+
+- Node.js 20+
+- npm 10+
+- A free [Supabase](https://supabase.com) account
+- A free [Groq](https://console.groq.com) account
+- A free [HuggingFace](https://huggingface.co) account
+
+---
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/sshntpdl/doc-chat.git
+cd docchat
+npm install
 ```
 
 ---
 
-## FLOW B — RAG QUERY (STREAMING)
+### 2. Set up Supabase
 
+1. Create a new project at [supabase.com](https://supabase.com)
+2. Go to **Settings → API** and copy your **Project URL** and **anon key**
+3. In the SQL Editor, run the schema:
+   - Open **SQL Editor → New Query**
+   - Paste the contents of `/packages/supabase/schema.sql`
+   - Click **Run**
+4. Go to **Authentication → URL Configuration** and set:
+   - Site URL: `http://localhost:3000`
+   - Redirect URLs: `http://localhost:3000/auth/callback`
+
+---
+
+### 3. Get your API keys
+
+**Groq (LLM)**
+
+1. Sign up at [console.groq.com](https://console.groq.com)
+2. Go to **API Keys → Create API Key**
+3. Copy the `gsk_...` key
+
+**HuggingFace (Embeddings)**
+
+1. Go to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+2. Create a new token with **Inference** type
+3. Copy the `hf_...` key
+
+---
+
+### 4. Configure environment variables
+
+```bash
+cp apps/web/.env.example apps/web/.env.local
+cp apps/mobile/.env.example apps/mobile/.env
 ```
-User types question → clicks Send
-      │
-      ▼ (1) useChatStore.sendMessage() adds optimistic messages to UI
-      │
-      ▼ (2) POST /api/chat  { sessionId, content, documentId }
-      │
-Route Handler:
-      ▼ (3) getAuthenticatedUser()
-      ▼ (4) rateLimiter(userId, 'chat', 30, 60000)
-      ▼ (5) Parse + validate body with Zod
-      ▼ (6) Load/create chat_session in DB
-      ▼ (7) INSERT user chat_message (persisted before streaming starts)
-      ▼ (8) INSERT empty assistant chat_message (filled in after stream)
-      │
-      ▼ (9) streamResponse(generateStream(...))
-      │         → headers: text/event-stream, X-Accel-Buffering: no
-      │
-Inside generateStream():
-      ▼ (10) yield { type: 'start', messageId, sessionId }
-      ▼ (11) embedQuery(content) → 384-dim vector (HF API)
-      ▼ (12) match_chunks RPC (Supabase pgvector, cosine similarity, top-4)
-      ▼ (13) buildSystemPrompt(chunks) → injects context into prompt
-      ▼ (14) ChatGroq.stream({ history, question }) → AsyncIterator<chunks>
-      ▼ (15) FOR each chunk: yield { type: 'token', content: token }
-      ▼ (16) yield { type: 'sources', sources: [...] }
-      ▼ (17) UPDATE chat_messages SET content=fullText, sources=[...]
-      ▼ (18) yield { type: 'done', totalTokens }
-      │
-Client-side (chatStore.sendMessage):
-      - ReadableStream reader parses each "data: {...}\n\n" line
-      - 'token' → appendToken() → immer mutates single message.content
-      - 'sources' → attachSources()
-      - 'done' → finalizeStreaming()
-      - React renders ONLY the streaming message (memo + useShallow)
+
+Open each file and fill in the values:
+
+```env
+# apps/web/.env.local
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+GROQ_API_KEY=gsk_...
+HUGGINGFACE_API_KEY=hf_...
+```
+
+```env
+# apps/mobile/.env
+EXPO_PUBLIC_SUPABASE_URL=your_supabase_project_url
+EXPO_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+EXPO_PUBLIC_API_URL=http://localhost:3000
 ```
 
 ---
 
-## WHY NEXT.JS AS THE BACKEND
+### 5. Start the web app
 
-Using Next.js Route Handlers as the only backend gives us:
+```bash
+npm run dev
+```
 
-1. **Single deployment**: Everything deploys to Vercel as one unit. No separate
-   Node.js server, no Docker, no infra. `vercel deploy` is the entire CI/CD.
-
-2. **Route Handlers vs Server Actions**: We use Route Handlers (not Server Actions)
-   for the AI endpoints because Route Handlers can return streaming responses
-   (ReadableStream with SSE). Server Actions are for form mutations that return
-   React state — not appropriate for long-running streams.
-
-3. **Mobile as just another client**: React Native calls the same `/api/**`
-   endpoints as the web app. It sends `Authorization: Bearer <token>` instead
-   of cookies, and `getAuthenticatedUser()` handles both transparently.
-
-4. **SSE streaming works in Vercel**: The key is `X-Accel-Buffering: no`.
-   Without it, Vercel's nginx proxy buffers the response and delivers all
-   tokens at once (negating the streaming UX). With it, each token flushes
-   immediately.
-
-5. **Trade-off**: This approach limits you to Vercel/Node.js runtime.
-   A FastAPI backend would be easier to scale independently and could use
-   Python's ML ecosystem. For a portfolio project, the simplicity wins.
+Open [http://localhost:3000](http://localhost:3000)
 
 ---
 
-## ZUSTAND STATE DESIGN
+### 6. Start the mobile app
 
+```bash
+cd apps/mobile
+npx expo start
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Zustand Stores                       │
-│                                                         │
-│  useAuthStore    — session, user, isInitialized         │
-│  ┌─ persisted: session tokens in localStorage           │
-│  └─ action: signOut() calls clearAllStores()            │
-│                                                         │
-│  useDocumentStore — documents[], uploadQueue{}          │
-│  ┌─ NOT persisted (re-fetched on mount)                 │
-│  └─ uploadQueue keyed by tempId (O(1) progress updates) │
-│                                                         │
-│  useChatStore — sessions{}, activeSessionId             │
-│  ┌─ NOT persisted (history loaded from DB on demand)    │
-│  ├─ appendToken() uses immer to mutate only one node    │
-│  └─ useCurrentMessages uses useShallow (no excess renders)│
-│                                                         │
-│  useUIStore — theme, toasts[], sidebarCollapsed         │
-│  └─ persisted: theme + sidebar state                    │
-└─────────────────────────────────────────────────────────┘
 
-WHAT GOES WHERE:
-  Zustand:          User data that survives component unmounts
-  Server Components: Initial page data (avoids client fetch on load)
-  URL state:         Active document/session ID (shareable links)
-  Local useState:    Ephemeral UI (hover state, input value, open/closed)
-```
+- Press `i` for iOS Simulator
+- Press `a` for Android Emulator
+- Scan the QR code with the **Expo Go** app on your phone
+
+> **On a physical device?** Change `EXPO_PUBLIC_API_URL` in `.env` from `localhost:3000` to your machine's local IP address (e.g. `192.168.1.5:3000`).
 
 ---
 
-## DESIGN SYSTEM TOKENS
-
-```
-COLOR PALETTE:
-  Primary:      #4F46E5 (indigo-600)   dark: #6366F1 (indigo-500)
-  Background:   #FFFFFF                dark: #0F172A (slate-900)
-  Surface:      #F9FAFB (gray-50)      dark: #1E293B (slate-800)
-  Border:       #E5E7EB (gray-200)     dark: #334155 (slate-700)
-  Foreground:   #111827 (gray-900)     dark: #F1F5F9 (slate-100)
-  Muted:        #6B7280 (gray-500)     dark: #94A3B8 (slate-400)
-  Success:      #16A34A                dark: #4ADE80
-  Warning:      #D97706                dark: #FCD34D
-  Destructive:  #DC2626                dark: #F87171
-
-SPACING: 4px base grid (4, 8, 12, 16, 20, 24, 32, 40, 48, 64)
-
-BORDER RADIUS:
-  sm: 4px   md: 8px   lg: 16px   xl: 24px   full: 9999px
-
-SHADOWS:
-  subtle:   0 1px 2px rgb(0 0 0 / 0.05)
-  default:  0 1px 3px rgb(0 0 0 / 0.1)
-  elevated: 0 4px 6px rgb(0 0 0 / 0.1)
-
-ANIMATION:
-  instant: 0ms   fast: 150ms   normal: 300ms   slow: 500ms
-
-TYPOGRAPHY:
-  xs: 12px   sm: 14px   base: 16px   lg: 18px
-  xl: 20px   2xl: 24px  3xl: 30px   4xl: 36px
-  Weights used: 400 (regular), 600 (semibold)
-  Font: Inter (system fallback: system-ui, sans-serif)
-```
-
----
-
-## COMPLETE FOLDER STRUCTURE
+## 📁 Project Structure
 
 ```
 docchat/
@@ -352,180 +303,18 @@ docchat/
 
 ---
 
-## STEP-BY-STEP SETUP GUIDE
+## 🤝 Contributing
 
-### Prerequisites
-- Node.js 20+
-- npm 10+
-- A Supabase account (free)
-- A Groq account (free)
-- A HuggingFace account (free)
+Pull requests are welcome! For major changes, please open an issue first to discuss what you'd like to change.
 
 ---
 
-### Step 1 — Clone and install
+## 📄 License
 
-```bash
-git clone <your-repo>
-cd docchat
-npm install
-```
+[MIT](LICENSE)
 
 ---
 
-### Step 2 — Create a Supabase project
-
-1. Go to https://supabase.com → New project
-2. Copy your **Project URL** and **anon key** from:
-   Settings → API → Project URL / anon public
-
----
-
-### Step 3 — Run the SQL schema
-
-1. In Supabase Dashboard → SQL Editor → New Query
-2. Paste the contents of `/packages/supabase/schema.sql`
-3. Click **Run**
-4. Verify: Table Editor should show 5 tables
-
----
-
-### Step 4 — Configure Supabase Auth
-
-In Supabase Dashboard → Authentication → URL Configuration:
-- **Site URL**: `http://localhost:3000`
-- **Redirect URLs**: Add `http://localhost:3000/auth/callback`
-
-For magic links to work (Email provider is on by default).
-
----
-
-### Step 5 — Get API keys
-
-**Groq (LLM)**:
-1. https://console.groq.com → Sign up (free)
-2. API Keys → Create API Key
-3. Copy the `gsk_...` key
-
-**HuggingFace (Embeddings)**:
-1. https://huggingface.co/settings/tokens
-2. New token → Type: **Inference**
-3. Copy the `hf_...` key
-
----
-
-### Step 6 — Create environment files
-
-```bash
-cp apps/web/.env.example apps/web/.env.local
-cp apps/mobile/.env.example apps/mobile/.env
-```
-
-Fill in all values in both files.
-
----
-
-### Step 7 — Run the web app
-
-```bash
-# From repo root:
-npm run dev
-
-# Or just the web app:
-cd apps/web && npm run dev
-```
-
-Open http://localhost:3000
-
----
-
-### Step 8 — Run the mobile app
-
-```bash
-cd apps/mobile
-
-# Install Expo CLI if needed
-npm install -g expo-cli
-
-# Start Expo
-npx expo start
-
-# Press 'i' for iOS simulator, 'a' for Android
-# For device: scan the QR code with Expo Go
-```
-
-**Note for physical devices**: Change `EXPO_PUBLIC_API_URL` in `.env`
-from `localhost:3000` to your machine's LAN IP (e.g. `192.168.1.5:3000`).
-
----
-
-### Step 9 — Deploy to Vercel
-
-```bash
-npm install -g vercel
-
-# From repo root:
-vercel
-
-# Set environment variables in Vercel Dashboard → Settings → Environment Variables
-# Add all variables from apps/web/.env.example
-```
-
----
-
-## KEY CODE EXPLANATIONS
-
-### Why immer in chatStore.appendToken()?
-```typescript
-// WITHOUT immer — spreads entire messages array on every token:
-set((s) => ({
-  ...s,
-  sessions: {
-    ...s.sessions,
-    [sessionId]: {
-      ...s.sessions[sessionId],
-      messages: s.sessions[sessionId].messages.map((m) =>
-        m.id === messageId ? { ...m, content: m.content + token } : m
-      ),
-    },
-  },
-}));
-// ↑ Creates new arrays/objects for EVERYTHING on every token (~50×/sec)
-
-// WITH immer — mutates only the leaf node:
-set((s) => {
-  const msg = s.sessions[sessionId]?.messages.find((m) => m.id === messageId);
-  if (msg) msg.content += token;
-});
-// ↑ Immer tracks which nodes changed; Zustand only notifies subscribers
-//   of the specific path that changed. 50× cheaper per token.
-```
-
-### Why XHR not fetch for uploads?
-```typescript
-// fetch() has NO upload progress events:
-const res = await fetch('/api/ingest', { method: 'POST', body: formData });
-// ↑ You get 0% → 100% instantly when upload completes. No real progress.
-
-// XHR exposes upload.onprogress:
-const xhr = new XMLHttpRequest();
-xhr.upload.onprogress = (event) => {
-  const pct = Math.round((event.loaded / event.total) * 100);
-  // ↑ Real percentage, fires ~20× during a large upload
-};
-```
-
-### Why pgvector uses cosine distance not dot product?
-Cosine similarity is unit-vector-agnostic: two identical texts will always
-score 1.0 regardless of vector magnitude. Dot product is sensitive to
-vector length, which varies by text length. For semantic similarity in
-RAG, cosine is the standard choice. The `<=>` operator in pgvector is
-cosine distance (0=identical, 2=opposite); we convert with `1 - distance`.
-
-### Why 384 dimensions (not 1536)?
-OpenAI's ada-002 uses 1536 dimensions. all-MiniLM-L6-v2 uses 384.
-Fewer dimensions means:
-- 75% less storage per chunk
-- 75% faster vector comparisons
-- Comparable retrieval quality for short-text similarity tasks
-- Free (vs ~$0.0001/1K tokens for ada-002)
+<div align="center">
+Made with ☕ and too many embeddings
+</div>
