@@ -123,7 +123,7 @@ function ToastItem({ toast }: { toast: Toast }) {
         </div>
       )}
 
-      <style jsx>{`
+      <style>{`
         @keyframes shrink {
           from {
             transform: scaleX(1);
