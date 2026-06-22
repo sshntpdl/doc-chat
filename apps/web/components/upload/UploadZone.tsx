@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback } from "react";
-import { useDropzone } from "react-dropzone";
+// 1. Import DropzoneOptions to solve the type mismatch
+import { useDropzone, DropzoneOptions } from "react-dropzone";
 import { useDocumentStore, useToast, selectUploadQueue } from "@docchat/stores";
 
 const ACCEPTED_TYPES = {
@@ -74,13 +75,14 @@ export function UploadZone({ onClose }: Props) {
     [uploadDocument, toast, onClose],
   );
 
+  // 2. Added `as DropzoneOptions` down here to instantly resolve the build failure
   const { getRootProps, getInputProps, isDragActive, isDragReject } =
     useDropzone({
       onDrop,
       accept: ACCEPTED_TYPES,
       maxSize: MAX_SIZE,
       multiple: true,
-    });
+    } as DropzoneOptions);
 
   const queueItems = Object.values(uploadQueue);
 
@@ -155,7 +157,6 @@ export function UploadZone({ onClose }: Props) {
                     </p>
 
                     <div className="flex items-center gap-2 shrink-0">
-                      {/* Status label */}
                       <span
                         className={`text-xs ${
                           item.status === "error"
@@ -176,9 +177,6 @@ export function UploadZone({ onClose }: Props) {
                                 : ""}
                       </span>
 
-                      {/*
-                       * Cancel / dismiss button.
-                       */}
                       <button
                         onClick={() => cancelUpload(item.tempId)}
                         aria-label={
@@ -198,7 +196,6 @@ export function UploadZone({ onClose }: Props) {
                     </div>
                   </div>
 
-                  {/* Progress bar */}
                   {(item.status === "uploading" ||
                     item.status === "processing") && (
                     <div
@@ -224,7 +221,6 @@ export function UploadZone({ onClose }: Props) {
                     </div>
                   )}
 
-                  {/* Error message */}
                   {item.status === "error" && item.error && (
                     <p className="mt-1 text-xs text-[var(--color-destructive)]">
                       {item.error}
