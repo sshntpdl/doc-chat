@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback } from "react";
-// 1. Import DropzoneOptions to solve the type mismatch
-import { useDropzone, DropzoneOptions } from "react-dropzone";
+// Import the proper types from react-dropzone
+import { useDropzone, FileRejection, Accept } from "react-dropzone";
 import { useDocumentStore, useToast, selectUploadQueue } from "@docchat/stores";
 
-const ACCEPTED_TYPES = {
+// Explicitly type the accepted types object
+const ACCEPTED_TYPES: Accept = {
   "application/pdf": [".pdf"],
   "text/plain": [".txt"],
   "text/markdown": [".md"],
@@ -47,8 +48,9 @@ export function UploadZone({ onClose }: Props) {
   const uploadQueue = useDocumentStore(selectUploadQueue);
   const toast = useToast();
 
+  // FIX: Properly typed acceptedFiles and rejectedFiles (FileRejection[])
   const onDrop = useCallback(
-    async (acceptedFiles: File[], rejectedFiles: any[]) => {
+    async (acceptedFiles: File[], rejectedFiles: FileRejection[]) => {
       for (const rejection of rejectedFiles) {
         const reason = rejection.errors[0]?.code;
         const msg =
@@ -61,9 +63,9 @@ export function UploadZone({ onClose }: Props) {
       }
 
       for (const file of acceptedFiles) {
-        uploadDocument(file).catch((err) => {
+        uploadDocument(file).catch((err: any) => {
           toast.error(`Failed to upload ${file.name}`, {
-            description: err.message,
+            description: err?.message || "Unknown error",
           });
         });
       }
@@ -75,14 +77,14 @@ export function UploadZone({ onClose }: Props) {
     [uploadDocument, toast, onClose],
   );
 
-  // 2. Added `as DropzoneOptions` down here to instantly resolve the build failure
+  // FIX: No type casting needed anymore. TypeScript infers this perfectly now.
   const { getRootProps, getInputProps, isDragActive, isDragReject } =
     useDropzone({
       onDrop,
       accept: ACCEPTED_TYPES,
       maxSize: MAX_SIZE,
       multiple: true,
-    } as DropzoneOptions);
+    });
 
   const queueItems = Object.values(uploadQueue);
 
@@ -135,7 +137,7 @@ export function UploadZone({ onClose }: Props) {
       {/* In-progress uploads */}
       {queueItems.length > 0 && (
         <div className="space-y-2" role="list" aria-label="Upload progress">
-          {queueItems.map((item) => {
+          {queueItems.map((item: any) => {
             const isActive =
               item.status === "uploading" || item.status === "processing";
 
