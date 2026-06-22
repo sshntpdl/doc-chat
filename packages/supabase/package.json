@@ -8,6 +8,10 @@
     ".": "./src/client.ts",
     "./middleware": "./src/middleware.ts"
   },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "type-check": "tsc --noEmit"
+  },
   "dependencies": {
     "@supabase/ssr": "^0.3.0",
     "@supabase/supabase-js": "^2.43.0"

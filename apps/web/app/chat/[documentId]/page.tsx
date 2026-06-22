@@ -1,20 +1,16 @@
 // FILE: apps/web/app/chat/[documentId]/page.tsx
 "use client";
 //
-// CHANGES vs v3:
+// CHANGES vs v4:
 //
-// 1. handleSelectSession — when the user clicks a session in the sidebar that
-//    was fetched as a stub (isLoaded = false), we call loadHistory() to hydrate
-//    its messages before activating it. This is lazy loading: we don't fetch
-//    every session's full message history upfront, only on demand.
+// 1. isLoadingHistory state — tracks when loadHistory() is in-flight for a
+//    selected old session. While true, the message area shows a skeleton
+//    loader instead of SuggestedQuestions. SuggestedQuestions is now only
+//    shown when the active session is genuinely new (isEmpty AND not loading).
 //
-// 2. handleNewChat now calls requestNewChat(documentId) instead of
-//    createSession(documentId). requestNewChat() refuses to create a new
-//    session when the active session is already empty — matching Claude /
-//    ChatGPT / Gemini behaviour.
-//
-// 3. ensureSessionForDocument dependency array is correct (documentId only).
-//    The action itself is stable (defined inside immer, never re-created).
+// 2. handleSelectSession — sets isLoadingHistory = true before awaiting
+//    loadHistory(), clears it after. setActiveSession still fires immediately
+//    for snappy sidebar highlighting.
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "next/navigation";
@@ -30,6 +26,8 @@ import { MessageBubble } from "@/components/chat/MessageBubble";
 import { ChatSidebar } from "@/components/chat/ChatSidebar";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { SuggestedQuestions } from "@/components/chat/SuggestedQuestions";
+
+// ─── PAGE ─────────────────────────────────────────────────────────────────────
 
 export default function ChatPage() {
   const { documentId } = useParams<{ documentId: string }>();
@@ -58,13 +56,16 @@ export default function ChatPage() {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [input, setInput] = useState<string>("");
 
+  // True only while loadHistory() is awaiting for a selected old session.
+  // Cleared immediately once the fetch settles (success or error).
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
   // ── Effects ───────────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (!doc) fetchDocuments();
   }, [doc, fetchDocuments]);
 
-  // Ensures a session exists for this document and kicks off session list fetch.
   useEffect(() => {
     ensureSessionForDocument(documentId);
   }, [documentId, ensureSessionForDocument]);
@@ -92,23 +93,26 @@ export default function ChatPage() {
   }
 
   /**
-   * handleSelectSession — called when the user clicks a session row in the sidebar.
+   * handleSelectSession — activates the session immediately for snappy sidebar
+   * highlighting, then lazy-loads the message history if this is a stub session.
    *
-   * If the session is a stub (fetched from server list, not yet fully loaded),
-   * we call loadHistory() first so the message list is populated.
-   * setActiveSession runs immediately so the UI highlights the row without
-   * waiting for the network — the message area will show a brief empty state
-   * then populate once loadHistory resolves.
+   * While loadHistory() is in-flight, isLoadingHistory = true so the message
+   * area renders a skeleton instead of the empty-state suggested questions.
    */
   const handleSelectSession = useCallback(
     async (id: string) => {
-      // Activate immediately for snappy UI
       setActiveSession(id);
 
       const session = sessions[id];
       if (session && !session.isLoaded) {
-        // Lazy-load the full message history for this session stub
-        await loadHistory(id);
+        setIsLoadingHistory(true);
+        try {
+          await loadHistory(id);
+        } finally {
+          // Always clear — even if loadHistory throws, we don't want a
+          // permanent spinner blocking the UI.
+          setIsLoadingHistory(false);
+        }
       }
     },
     [sessions, setActiveSession, loadHistory],
@@ -122,9 +126,16 @@ export default function ChatPage() {
     [isStreaming, activeSessionId, sendMessage, documentId],
   );
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Derived state ──────────────────────────────────────────────────────────
 
   const isEmpty = messages.length === 0;
+
+  // Show suggested questions only for genuinely new (empty + not loading) sessions.
+  // While loading an old session's history, isEmpty is temporarily true — we must
+  // not flash the suggested questions UI in that window.
+  const showSuggestions = isEmpty && !isLoadingHistory;
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="flex h-screen bg-[var(--color-background)] overflow-hidden">
@@ -169,17 +180,36 @@ export default function ChatPage() {
         {/* Messages area */}
         <div className="flex-1 overflow-y-auto px-4 py-6">
           <div className="max-w-2xl mx-auto space-y-6">
-            {isEmpty && (
+            {/* Loading skeleton — shown while fetching an old session's history */}
+            {isLoadingHistory && (
+              <div
+                className="flex flex-col items-center justify-center gap-3 py-20
+                  text-[var(--color-muted-foreground)]"
+              >
+                <span
+                  className="w-7 h-7 rounded-full border-2
+                 border-[var(--color-border)]
+                 border-t-[var(--color-primary)]
+                 animate-spin"
+                />
+                <p className="text-xs">Loading chat…</p>
+              </div>
+            )}
+
+            {/* Suggested questions — only for genuinely new empty sessions */}
+            {showSuggestions && (
               <SuggestedQuestions onSelect={handleSuggestedQuestion} />
             )}
 
-            {messages.map((message) => (
-              <MessageBubble
-                key={message.id}
-                message={message}
-                isStreaming={isStreaming && message.id === streamingMessageId}
-              />
-            ))}
+            {/* Message list */}
+            {!isLoadingHistory &&
+              messages.map((message) => (
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  isStreaming={isStreaming && message.id === streamingMessageId}
+                />
+              ))}
 
             <div ref={messagesEndRef} aria-hidden="true" />
           </div>

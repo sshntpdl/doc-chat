@@ -1,14 +1,18 @@
 // FILE: /apps/web/components/chat/SourceCitation.tsx
 "use client";
 
-import { useState }               from "react";
+import { useState } from "react";
 import type { SourceCitation as Citation } from "@docchat/types";
 
-interface Props { sources: Citation[] }
+interface Props {
+  sources: Citation[];
+}
 
 export function SourceCitation({ sources }: Props) {
-  const [expanded,  setExpanded]  = useState(false);
-  const [expandedSnippets, setExpandedSnippets] = useState<Set<number>>(new Set());
+  const [expanded, setExpanded] = useState(false);
+  const [expandedSnippets, setExpandedSnippets] = useState<Set<number>>(
+    new Set(),
+  );
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
   function toggleSnippet(idx: number) {
@@ -25,125 +29,199 @@ export function SourceCitation({ sources }: Props) {
     setTimeout(() => setCopiedIdx(null), 2000);
   }
 
-  // Confidence color coding based on cosine similarity score
-  function getSimilarityColor(sim: number) {
-    if (sim >= 0.8) return { bar: "bg-[var(--color-success)]",      label: "High"     };
-    if (sim >= 0.6) return { bar: "bg-[var(--color-warning)]",      label: "Moderate" };
-    return              { bar: "bg-[var(--color-destructive)]",     label: "Low"      };
+  // Confidence color — used only inside the expanded snippet drawer
+  function getSimilarityColor(sim: number): {
+    bar: string;
+    label: string;
+    dot: string;
+  } {
+    if (sim >= 0.8)
+      return {
+        bar: "bg-[var(--color-success)]",
+        label: "High",
+        dot: "bg-[var(--color-success)]",
+      };
+    if (sim >= 0.6)
+      return {
+        bar: "bg-[var(--color-warning)]",
+        label: "Moderate",
+        dot: "bg-[var(--color-warning)]",
+      };
+    return {
+      bar: "bg-[var(--color-destructive)]",
+      label: "Low",
+      dot: "bg-[var(--color-destructive)]",
+    };
   }
 
   return (
-    <div className="mt-2 w-full">
-      {/* Collapsed toggle */}
+    <div className="mt-1.5 w-full">
+      {/* ── Toggle row ── */}
       <button
         onClick={() => setExpanded((v) => !v)}
-        className="flex items-center gap-1.5 text-xs text-[var(--color-muted)]
-                   hover:text-[var(--color-foreground)] transition-colors group"
+        className="flex items-center gap-1.5 text-xs
+                   text-[var(--color-muted-foreground)]
+                   hover:text-[var(--color-foreground)]
+                   transition-colors select-none"
         aria-expanded={expanded}
-        aria-label={`${expanded ? "Hide" : "Show"} ${sources.length} source citation${sources.length !== 1 ? "s" : ""}`}
+        aria-label={`${expanded ? "Hide" : "Show"} ${sources.length} source${sources.length !== 1 ? "s" : ""}`}
       >
+        {/* Chevron */}
         <span
-          className={`transition-transform duration-[var(--duration-fast)]
+          className={`inline-block transition-transform duration-[var(--duration-fast)]
+                     text-[var(--color-muted-foreground)]
                      ${expanded ? "rotate-90" : "rotate-0"}`}
           aria-hidden="true"
         >
           ›
         </span>
-        <span className="underline underline-offset-2 decoration-dotted">
-          {sources.length} source{sources.length !== 1 ? "s" : ""} cited
+
+        <span className="font-medium">
+          {expanded ? "Hide" : "Show"} sources
+        </span>
+
+        {/* Pill badge with count */}
+        <span
+          className="inline-flex items-center justify-center
+                     min-w-[1.25rem] h-5 px-1.5 rounded-full
+                     text-[0.65rem] font-semibold leading-none
+                     bg-[var(--color-surface-hover)]
+                     border border-[var(--color-border)]
+                     text-[var(--color-muted-foreground)]"
+          aria-hidden="true"
+        >
+          {sources.length}
         </span>
       </button>
 
-      {/* Expanded citations */}
+      {/* ── Expanded source list ── */}
       <div
         className={`overflow-hidden transition-all duration-[var(--duration-normal)]
-                   ${expanded ? "max-h-[600px] mt-2 opacity-100" : "max-h-0 opacity-0"}`}
+                   ${expanded ? "max-h-[800px] mt-2 opacity-100" : "max-h-0 opacity-0"}`}
       >
-        <div className="space-y-2" role="list" aria-label="Source citations">
+        <ol className="space-y-1" role="list" aria-label="Source citations">
           {sources.map((source, idx) => {
-            const simConfig   = getSimilarityColor(source.similarity);
+            const simConfig = getSimilarityColor(source.similarity);
             const isSnippetExpanded = expandedSnippets.has(idx);
-            const isCopied    = copiedIdx === idx;
+            const isCopied = copiedIdx === idx;
+            const citationNumber = idx + 1;
 
             return (
-              <button
-                key={idx}
-                role="listitem"
-                onClick={() => copySnippet(idx, source.snippet)}
-                className="w-full text-left p-3 rounded-[var(--radius-md)] border
-                           border-[var(--color-border)] bg-[var(--color-surface)]
-                           hover:border-[var(--color-border-strong)]
-                           hover:bg-[var(--color-surface-hover)]
-                           transition-colors group/citation relative"
-                title="Click to copy snippet"
-              >
-                {/* Header row */}
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-base shrink-0" aria-hidden="true">📄</span>
-                    <span className="text-xs font-semibold text-[var(--color-foreground)] truncate">
-                      {source.documentName}
-                    </span>
-                  </div>
-                  <span
-                    className="shrink-0 text-xs px-1.5 py-0.5 rounded bg-[var(--color-surface-hover)]
-                               text-[var(--color-muted)] whitespace-nowrap"
-                  >
-                    p. {source.pageNumber}
-                  </span>
-                </div>
-
-                {/* Similarity meter */}
-                <div className="mt-2 flex items-center gap-2">
-                  <div
-                    className="flex-1 h-1 bg-[var(--color-border)] rounded-full overflow-hidden"
-                    role="meter"
-                    aria-label={`Similarity: ${Math.round(source.similarity * 100)}%`}
-                    aria-valuenow={Math.round(source.similarity * 100)}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                  >
-                    <div
-                      className={`h-full rounded-full ${simConfig.bar} transition-all duration-[var(--duration-slow)]`}
-                      style={{ width: `${Math.round(source.similarity * 100)}%` }}
-                    />
-                  </div>
-                  <span className="text-xs text-[var(--color-muted)] whitespace-nowrap">
-                    {simConfig.label} · {Math.round(source.similarity * 100)}%
-                  </span>
-                </div>
-
-                {/* Snippet */}
-                <p
-                  className={`mt-2 text-xs italic text-[var(--color-muted)] leading-relaxed
-                             ${isSnippetExpanded ? "" : "line-clamp-2"}`}
+              <li key={idx} role="listitem">
+                {/* ── Source row ── */}
+                <div
+                  className="flex items-start gap-2.5 group/row
+                             py-1.5 px-0 rounded-[var(--radius-sm)]"
                 >
-                  "{source.snippet}"
-                </p>
-
-                {source.snippet.length > 120 && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); toggleSnippet(idx); }}
-                    className="mt-1 text-xs text-[var(--color-primary)] hover:underline"
-                  >
-                    {isSnippetExpanded ? "Show less" : "Show more"}
-                  </button>
-                )}
-
-                {/* Copy feedback */}
-                {isCopied && (
+                  {/* Number circle — matches the mobile numbered badges */}
                   <span
-                    className="absolute top-2 right-2 text-xs text-[var(--color-success)]
-                               bg-[var(--color-success-subtle)] px-2 py-0.5 rounded-full"
-                    aria-live="polite"
+                    className="shrink-0 inline-flex items-center justify-center
+                               w-5 h-5 mt-0.5 rounded-full
+                               text-[0.6rem] font-bold leading-none
+                               bg-[var(--color-surface-hover)]
+                               border border-[var(--color-border)]
+                               text-[var(--color-muted-foreground)]"
+                    aria-hidden="true"
                   >
-                    Copied!
+                    {citationNumber}
                   </span>
+
+                  {/* Right side: doc name + page + actions */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline gap-1.5 min-w-0">
+                      {/* Document name — primary label */}
+                      <span
+                        className="text-xs font-medium text-[var(--color-foreground)] truncate"
+                        title={source.documentName}
+                      >
+                        {source.documentName}
+                      </span>
+
+                      {/* Page number — muted, always visible */}
+                      <span className="shrink-0 text-xs text-[var(--color-muted-foreground)]">
+                        p. {source.pageNumber}
+                      </span>
+                    </div>
+
+                    {/* ── Expandable snippet drawer ── */}
+                    {source.snippet && (
+                      <>
+                        {isSnippetExpanded && (
+                          <div className="mt-1.5 space-y-1.5">
+                            {/* Snippet text */}
+                            <p
+                              className="text-xs italic leading-relaxed
+                                         text-[var(--color-muted-foreground)]
+                                         border-l-2 border-[var(--color-border)]
+                                         pl-2"
+                            >
+                              "{source.snippet}"
+                            </p>
+
+                            {/* Similarity meter — tucked inside snippet */}
+                            <div className="flex items-center gap-2">
+                              <div
+                                className="flex-1 h-0.5 bg-[var(--color-border)] rounded-full overflow-hidden"
+                                role="meter"
+                                aria-label={`Similarity: ${Math.round(source.similarity * 100)}%`}
+                                aria-valuenow={Math.round(
+                                  source.similarity * 100,
+                                )}
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                              >
+                                <div
+                                  className={`h-full rounded-full ${simConfig.bar}
+                                             transition-all duration-[var(--duration-slow)]`}
+                                  style={{
+                                    width: `${Math.round(source.similarity * 100)}%`,
+                                  }}
+                                />
+                              </div>
+                              <span className="text-[0.65rem] text-[var(--color-muted-foreground)] whitespace-nowrap">
+                                {simConfig.label} ·{" "}
+                                {Math.round(source.similarity * 100)}%
+                              </span>
+                            </div>
+
+                            {/* Copy snippet button */}
+                            <button
+                              onClick={() => copySnippet(idx, source.snippet)}
+                              className="text-[0.65rem] text-[var(--color-muted-foreground)]
+                                         hover:text-[var(--color-foreground)]
+                                         transition-colors"
+                              aria-label={isCopied ? "Copied!" : "Copy snippet"}
+                            >
+                              {isCopied ? "✓ Copied" : "Copy snippet"}
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Expand / collapse snippet toggle */}
+                        <button
+                          onClick={() => toggleSnippet(idx)}
+                          className="mt-0.5 text-[0.65rem] text-[var(--color-primary)]
+                                     hover:underline transition-colors"
+                          aria-expanded={isSnippetExpanded}
+                          aria-label={
+                            isSnippetExpanded ? "Hide excerpt" : "Show excerpt"
+                          }
+                        >
+                          {isSnippetExpanded ? "Hide excerpt" : "View excerpt"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Divider between items (not after last) */}
+                {idx < sources.length - 1 && (
+                  <div className="ml-[1.875rem] h-px bg-[var(--color-border)] opacity-60" />
                 )}
-              </button>
+              </li>
             );
           })}
-        </div>
+        </ol>
       </div>
     </div>
   );

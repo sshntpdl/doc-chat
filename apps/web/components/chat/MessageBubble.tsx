@@ -63,32 +63,36 @@ function StreamingCursor() {
   );
 }
 
-// ─── INLINE CITATION ANNOTATION ──────────────────────────────────────────────
-// Renders [Doc: filename, p.X] as smaller, muted inline text.
-// Recedes behind the main sentence but is readable on hover.
+// ─── INLINE CITATION NUMBER BADGE ────────────────────────────────────────────
+// Renders a small superscript number badge matching the mobile UI.
+// Each unique citation gets a sequential number (1-based) within the message.
 
-function CitationAnnotation({
+function CitationBadge({
+  number,
   filename,
   page,
 }: {
+  number: number;
   filename: string;
   page: string;
 }) {
-  const displayName =
-    filename.length > 32 ? filename.slice(0, 30) + "…" : filename;
-
   return (
-    <span
+    <sup
       title={`${filename}, ${page}`}
-      className="inline-block align-baseline mx-[1px]
-                 text-[0.72em] leading-none
+      className="inline-flex items-center justify-center
+                 w-[1.1em] h-[1.1em] mx-[1px]
+                 text-[0.6em] font-semibold leading-none
+                 rounded-full
+                 bg-[var(--color-surface-hover)]
                  text-[var(--color-muted-foreground)]
-                 opacity-60 hover:opacity-100
-                 transition-opacity cursor-default whitespace-nowrap"
-      aria-label={`Source: ${filename}, ${page}`}
+                 border border-[var(--color-border)]
+                 align-super cursor-default
+                 hover:bg-[var(--color-border)]
+                 transition-colors"
+      aria-label={`Source ${number}: ${filename}, ${page}`}
     >
-      [{displayName}, {page}]
-    </span>
+      {number}
+    </sup>
   );
 }
 
@@ -107,16 +111,55 @@ function CitationAnnotation({
 //
 // SOLUTION: split the raw content string on citation patterns BEFORE it reaches
 // ReactMarkdown. Each piece is either a plain markdown string (rendered normally)
-// or a citation object (rendered as <CitationAnnotation> directly in React).
+// or a citation object (rendered as <CitationBadge> directly in React).
 // No markdown tricks needed — citations never enter the markdown pipeline at all.
+//
+// NUMBERING: each [Doc: filename, p.X] token resolves to a 1-based number by
+// matching it against the message's sources[] array (documentName + pageNumber).
+//
+// WHY THIS APPROACH:
+//   If the same source is cited 5 times (e.g. all bullets reference sources[0]),
+//   a positional counter would produce badges 1–5 even though only 1 source exists.
+//   The user would see "5 sources" in the list but only 1 entry — confusing.
+//
+//   By looking up filename+page in sources[], repeated references to the same
+//   source all show the same badge number (e.g. all "1"), and the number
+//   displayed in the badge always equals the row number in the SourceCitation list.
+
+import type { SourceCitation as CitationSource } from "@docchat/types";
 
 type TextSegment = { type: "text"; content: string };
-type CitationSegment = { type: "citation"; filename: string; page: string };
+type CitationSegment = {
+  type: "citation";
+  filename: string;
+  page: string;
+  /** 1-based index into sources[] — same source always gets the same number */
+  number: number;
+};
 type Segment = TextSegment | CitationSegment;
 
 const DOC_CITATION_RE = /\[Doc:\s*([^\],]+?),\s*(p\.[\d–\-,\s]+?)\]/g;
 
-function splitIntoCitationSegments(content: string): Segment[] {
+/**
+ * Build a lookup map: "normalised documentName||pageNumber" → 1-based index.
+ * Normalised = lowercased + trimmed to absorb minor casing/spacing differences.
+ */
+function buildSourceIndexMap(
+  sources: CitationSource[] | undefined,
+): Map<string, number> {
+  const map = new Map<string, number>();
+  if (!sources) return map;
+  sources.forEach((src, i) => {
+    const key = `${src.documentName.trim().toLowerCase()}||${String(src.pageNumber).trim()}`;
+    if (!map.has(key)) map.set(key, i + 1); // first occurrence wins, 1-based
+  });
+  return map;
+}
+
+function splitIntoCitationSegments(
+  content: string,
+  sourceIndexMap: Map<string, number>,
+): Segment[] {
   const segments: Segment[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -124,28 +167,29 @@ function splitIntoCitationSegments(content: string): Segment[] {
   DOC_CITATION_RE.lastIndex = 0;
 
   while ((match = DOC_CITATION_RE.exec(content)) !== null) {
-    // Plain text before this citation
     if (match.index > lastIndex) {
       segments.push({
         type: "text",
         content: content.slice(lastIndex, match.index),
       });
     }
-    // The citation itself
-    segments.push({
-      type: "citation",
-      filename: match[1].trim(),
-      page: match[2].trim(),
-    });
+
+    const filename = match[1].trim();
+    const page = match[2].trim(); // e.g. "p.1"
+    // Strip leading "p." so the page value matches src.pageNumber (which is a number)
+    const pageNum = page.replace(/^p\.\s*/i, "").trim();
+    const key = `${filename.toLowerCase()}||${pageNum}`;
+    // Fall back to 1 if the token doesn't match any source (defensive)
+    const number = sourceIndexMap.get(key) ?? 1;
+
+    segments.push({ type: "citation", filename, page, number });
     lastIndex = match.index + match[0].length;
   }
 
-  // Any remaining text after the last citation
   if (lastIndex < content.length) {
     segments.push({ type: "text", content: content.slice(lastIndex) });
   }
 
-  // If no citations were found, return a single text segment
   return segments.length > 0 ? segments : [{ type: "text", content }];
 }
 
@@ -172,20 +216,24 @@ const markdownComponents = {
 };
 
 // ─── AI MESSAGE BODY ─────────────────────────────────────────────────────────
-// Renders segments: markdown text pieces interspersed with citation chips.
+// Renders segments: markdown text pieces interspersed with citation number badges.
 // Each text segment gets its own <ReactMarkdown> instance so the prose
 // styles and GFM features apply normally within each chunk.
 
 interface AIBodyProps {
   content: string;
   isReceivingTokens: boolean;
+  sources: CitationSource[] | undefined;
 }
 
-function AIMessageBody({ content, isReceivingTokens }: AIBodyProps) {
-  const segments = useMemo(() => splitIntoCitationSegments(content), [content]);
+function AIMessageBody({ content, isReceivingTokens, sources }: AIBodyProps) {
+  const segments = useMemo(() => {
+    const sourceIndexMap = buildSourceIndexMap(sources);
+    return splitIntoCitationSegments(content, sourceIndexMap);
+  }, [content, sources]);
 
   // Find the index of the last text segment so we can attach the
-  // streaming cursor to it (not to a trailing citation chip).
+  // streaming cursor to it (not to a trailing citation badge).
   const lastTextIdx = segments.reduce<number>(
     (last, seg, i) => (seg.type === "text" ? i : last),
     -1,
@@ -196,20 +244,21 @@ function AIMessageBody({ content, isReceivingTokens }: AIBodyProps) {
       {segments.map((seg, i) => {
         if (seg.type === "citation") {
           return (
-            <CitationAnnotation
+            <CitationBadge
               key={i}
+              number={seg.number}
               filename={seg.filename}
               page={seg.page}
             />
           );
         }
 
-        // Text segment — wrap in a span so CitationAnnotation siblings sit inline
+        // Text segment — wrap in a span so CitationBadge siblings sit inline
         const isLastText = i === lastTextIdx;
 
         return (
           // `contents` makes the span not create a new block box, so the
-          // trailing citation chip stays inline with the preceding text.
+          // trailing citation badge stays inline with the preceding text.
           <span key={i} className="contents">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
@@ -316,6 +365,7 @@ export const MessageBubble = memo(function MessageBubble({
                 <AIMessageBody
                   content={message.content}
                   isReceivingTokens={isReceivingTokens ?? false}
+                  sources={message.sources}
                 />
               )}
             </div>

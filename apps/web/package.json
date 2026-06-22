@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "dev": "next dev -H 0.0.0.0 -p 3000",
+    "dev": "cross-env NO_COLOR=1 next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",

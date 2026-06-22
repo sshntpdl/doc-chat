@@ -18,14 +18,23 @@
 //
 // 3. ACTIVE SESSION HIGHLIGHT + HISTORY STUB DISPLAY:
 //    Sessions fetched from the server are stubs (no messages yet). Their
-//    message count is only shown after loadHistory() fills them in.
-//    Until then we show just the date.
+//    message count is only shown after loadHistory() fills them in — until
+//    then we show a "tap to load" hint alongside the date.
 //
 // 4. DELETE BUTTON (unchanged from v2 — kept as-is):
 //    Trash icon on hover, confirm for sessions with messages, streaming guard.
 //
 // 5. "+ New Chat" BUTTON STATE (unchanged from v2):
 //    Dimmed + tooltip when already in an empty session.
+//
+// VISUAL REFRESH (this pass):
+//    Restyled to match the reference layout — pill-shaped "Library" nav,
+//    a proper document card (icon avatar + name + meta) instead of a bare
+//    text block, and a left-accent-bar treatment for the active session
+//    instead of a solid highlight fill. No store wiring, handlers, or
+//    pagination logic were changed — markup/classNames and two copy
+//    strings only ("Chats" → "History"; unloaded stub now says
+//    "tap to load" instead of nothing).
 
 import { useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
@@ -42,6 +51,15 @@ interface ChatSidebarProps {
   onSelectSession: (id: string) => void;
   onNewChat: () => void;
 }
+
+// ─── FILE TYPE → COLOR (kept consistent with DocumentCard's palette) ──────────
+
+const FILE_ICON_CONFIG: Record<string, string> = {
+  pdf: "from-emerald-400 to-teal-500",
+  markdown: "from-violet-400 to-purple-500",
+  text: "from-sky-400 to-blue-500",
+};
+const FALLBACK_ICON_GRADIENT = "from-slate-400 to-slate-500";
 
 // ─── ICONS ────────────────────────────────────────────────────────────────────
 
@@ -65,14 +83,65 @@ function TrashIcon() {
   );
 }
 
+function ArrowLeftIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M9.5 6h-7M5.25 2.75 2 6l3.25 3.25"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function FileGlyph() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M4 1.5h5.5L13 5v8a1 1 0 01-1 1H4a1 1 0 01-1-1V2.5a1 1 0 011-1z"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9.5 1.5V5h3.5"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M5 8.25h6M5 10.5h6M5 12.75h3.5"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 // ─── SKELETON ─────────────────────────────────────────────────────────────────
 // Shown on the very first load before any sessions arrive.
 
 function SessionSkeleton() {
   return (
-    <div className="space-y-0.5 px-2 py-1" aria-hidden="true">
+    <div className="space-y-1 px-2 py-1" aria-hidden="true">
       {[72, 56, 80].map((w) => (
-        <div key={w} className="px-3 py-2.5 rounded-[var(--radius-md)]">
+        <div key={w} className="px-3 py-2.5 rounded-[var(--radius-lg)]">
           <div
             className="h-3 rounded-full bg-[var(--color-surface-hover)] animate-pulse mb-2"
             style={{ width: `${w}%` }}
@@ -160,6 +229,9 @@ export function ChatSidebar({
   // ── Derived state ──────────────────────────────────────────────────────────
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const activeIsEmpty = !activeSession || activeSession.messages.length === 0;
+  const iconGradient = doc
+    ? (FILE_ICON_CONFIG[doc.type] ?? FALLBACK_ICON_GRADIENT)
+    : FALLBACK_ICON_GRADIENT;
 
   // ── Load-more callback (stable ref so IntersectionObserver doesn't re-attach) ──
   const handleLoadMore = useCallback(() => {
@@ -205,33 +277,48 @@ export function ChatSidebar({
                  overflow-hidden shrink-0
                  ${collapsed ? "w-0" : "w-[280px]"}`}
     >
-      {/* ── Document header ──────────────────────────────────────────── */}
-      <div className="p-4 border-b border-[var(--color-sidebar-border)] shrink-0">
+      {/* ── Top: back nav + document card ───────────────────────────────── */}
+      <div className="p-3 border-b border-[var(--color-sidebar-border)] shrink-0 space-y-3">
         <Link
           href="/dashboard"
-          className="inline-flex items-center gap-1 text-xs
-                     text-[var(--color-muted)] hover:text-[var(--color-primary)]
-                     transition-colors mb-3"
+          className="inline-flex w-fit items-center gap-1.5 px-3 py-1.5 rounded-full
+                     border border-[var(--color-sidebar-border)] text-xs font-medium
+                     text-[var(--color-primary)] hover:bg-[var(--color-surface-hover)]
+                     transition-colors"
         >
-          ← Library
+          <ArrowLeftIcon />
+          Library
         </Link>
 
         {doc ? (
-          <>
-            <p
-              className="font-semibold text-sm text-[var(--color-foreground)]
-                         truncate leading-snug"
-              title={doc.name}
+          <div
+            className="flex items-center gap-3 p-2.5 rounded-[var(--radius-lg)]
+                       bg-[var(--color-surface)] border border-[var(--color-sidebar-border)]"
+          >
+            <div
+              className={`flex items-center justify-center w-9 h-9 shrink-0 rounded-lg
+                          bg-gradient-to-br ${iconGradient} text-white
+                          shadow-[inset_0_1px_0_rgba(255,255,255,0.3)]`}
+              aria-hidden="true"
             >
-              {doc.name}
-            </p>
-            <p className="text-xs text-[var(--color-muted)] mt-1">
-              {doc.chunkCount > 0 ? `${doc.chunkCount} chunks · ` : ""}
-              {doc.type.toUpperCase()}
-            </p>
-          </>
+              <FileGlyph />
+            </div>
+            <div className="min-w-0">
+              <p
+                className="font-semibold text-sm text-[var(--color-foreground)]
+                           truncate leading-snug"
+                title={doc.name}
+              >
+                {doc.name}
+              </p>
+              <p className="text-xs text-[var(--color-muted)] mt-0.5 truncate">
+                {doc.chunkCount > 0 ? `${doc.chunkCount} chunks · ` : ""}
+                {doc.type.toUpperCase()}
+              </p>
+            </div>
+          </div>
         ) : (
-          <p className="text-sm text-[var(--color-muted)]">Loading…</p>
+          <p className="text-sm text-[var(--color-muted)] px-1">Loading…</p>
         )}
       </div>
 
@@ -242,7 +329,7 @@ export function ChatSidebar({
           title={
             activeIsEmpty ? "You're already in a new chat" : "Start a new chat"
           }
-          className={`w-full py-2 rounded-[var(--radius-md)]
+          className={`w-full py-2 rounded-full
                      border border-[var(--color-border)] text-sm
                      transition-colors flex items-center justify-center gap-2
                      ${
@@ -260,10 +347,10 @@ export function ChatSidebar({
       {/* ── Session list ──────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-0.5">
         <p
-          className="px-2 pt-1 pb-2 text-xs font-semibold
-                      text-[var(--color-muted-foreground)] uppercase tracking-wide"
+          className="px-2 pt-1 pb-2 text-[10px] font-semibold
+                      text-[var(--color-muted-foreground)] uppercase tracking-wider"
         >
-          Chats
+          History · Hover to delete
         </p>
 
         {/* Empty state — only shown after fetch with zero results */}
@@ -288,15 +375,14 @@ export function ChatSidebar({
           const showDelete = hoveredId === session.id && !isDeleting;
 
           // Sub-label: show msg count when loaded, "empty" for confirmed-empty,
-          // nothing (just date) for unhydrated stubs.
+          // "tap to load" for unhydrated stubs (history not fetched yet).
           let subLabel: string;
           if (session.isLoaded) {
             subLabel = hasMessages
               ? `${msgCount} msg${msgCount !== 1 ? "s" : ""}`
               : "empty";
           } else {
-            // Not yet loaded from server — just show date, no msg count
-            subLabel = "";
+            subLabel = "tap to load";
           }
 
           return (
@@ -306,21 +392,35 @@ export function ChatSidebar({
               onMouseEnter={() => setHoveredId(session.id)}
               onMouseLeave={() => setHoveredId(null)}
             >
+              {/* Active session accent bar */}
+              {isActive && (
+                <span
+                  aria-hidden="true"
+                  className="absolute left-0 top-1.5 bottom-1.5 w-[3px]
+                             rounded-full bg-[var(--color-primary)]"
+                />
+              )}
+
               {/* Session row button */}
               <button
                 onClick={() => onSelectSession(session.id)}
                 disabled={isDeleting}
-                className={`w-full text-left px-3 py-2.5 rounded-[var(--radius-md)]
+                className={`w-full text-left py-2.5 rounded-[var(--radius-lg)]
                            text-sm transition-colors pr-9
+                           ${isActive ? "pl-4" : "pl-3"}
                            ${
                              isActive
-                               ? "bg-[var(--color-primary-subtle)] text-[var(--color-primary)]"
+                               ? "bg-[var(--color-primary-subtle)] text-[var(--color-foreground)]"
                                : "text-[var(--color-foreground)] hover:bg-[var(--color-surface-hover)]"
                            }
                            ${isDeleting ? "opacity-40 pointer-events-none" : ""}`}
                 aria-current={isActive ? "true" : undefined}
               >
-                <p className="font-medium truncate">
+                <p
+                  className={
+                    isActive ? "font-semibold truncate" : "font-medium truncate"
+                  }
+                >
                   {session.title || "New Chat"}
                 </p>
                 <p className="text-xs text-[var(--color-muted)] mt-0.5 truncate">
