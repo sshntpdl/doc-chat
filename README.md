@@ -20,6 +20,8 @@
 
 DocChat is a full-stack AI application that lets you **upload PDF documents and have conversations with them**. Ask questions in plain English and get accurate, cited answers pulled directly from your documents — available on both web and mobile.
 
+**Live Demo:** https://doc-chat-web-zo8m.vercel.app
+
 ---
 
 ## 📸 Screenshots
