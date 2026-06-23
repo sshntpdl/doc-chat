@@ -75,7 +75,7 @@ function getFirstName(session: Session | null): string {
   return email.split("@")[0] || "there";
 }
 
-// HEADER SUBCOMPONENT
+// HEADER
 
 interface HeaderProps {
   readonly selectMode: boolean;
@@ -105,9 +105,7 @@ function Header({
         >
           <Text style={s.cancelText}>Cancel</Text>
         </TouchableOpacity>
-
         <Text style={s.headerTitle}>{selectedCount} selected</Text>
-
         <TouchableOpacity
           onPress={onDelete}
           hitSlop={HIT_SLOP}
@@ -131,7 +129,6 @@ function Header({
       </View>
     );
   }
-
   return (
     <View style={s.header}>
       <View>
@@ -163,7 +160,6 @@ function Header({
 }
 
 // DOCUMENT CARD
-
 interface DocumentCardProps {
   readonly item: Document;
   readonly selectMode: boolean;
@@ -184,12 +180,6 @@ function DocumentCard({
 
   return (
     <Pressable
-      style={({ pressed }) => [
-        s.docCard,
-        isSelected && s.docCardSelected,
-        !isReady && !selectMode && s.docCardDisabled,
-        pressed && (isReady || selectMode) && s.docCardPressed,
-      ]}
       onPress={() => onPress(item)}
       onLongPress={() => onLongPress(item.id)}
       delayLongPress={400}
@@ -199,45 +189,54 @@ function DocumentCard({
         disabled: !isReady && !selectMode,
         selected: isSelected,
       }}
+      style={({ pressed }) => [
+        s.cardShell,
+        isSelected && s.cardShellSelected,
+        !isReady && !selectMode && s.cardShellDisabled,
+        pressed && (isReady || selectMode) && s.cardShellPressed,
+      ]}
     >
-      {/* Left accent bar */}
-      <View style={[s.accentBar, { backgroundColor: docStyle.accent }]} />
+      {/*
+        This View — NOT the Pressable — owns the row layout.
+      */}
+      <View style={s.cardRow}>
+        <View style={[s.accentBar, { backgroundColor: docStyle.accent }]} />
 
-      {/* Icon box */}
-      <View style={[s.iconBox, { backgroundColor: docStyle.bg }]}>
-        <Text style={s.docIcon}>{docStyle.icon}</Text>
-      </View>
+        <View style={[s.iconBox, { backgroundColor: docStyle.bg }]}>
+          <Text style={s.docIcon}>{docStyle.icon}</Text>
+        </View>
 
-      {/* Text */}
-      <View style={s.docInfo}>
-        <Text style={s.docName} numberOfLines={2}>
-          {item.name}
-        </Text>
-        <View style={s.docMetaRow}>
-          <View style={[s.typePill, { borderColor: `${docStyle.accent}55` }]}>
-            <Text style={[s.typePillText, { color: docStyle.accent }]}>
-              {item.type.toUpperCase()}
+        {/* Text column — title on top, meta below */}
+        <View style={s.docInfo}>
+          <Text style={s.docName} numberOfLines={2}>
+            {item.name}
+          </Text>
+          <View style={s.docMetaRow}>
+            <View style={[s.typePill, { borderColor: `${docStyle.accent}55` }]}>
+              <Text style={[s.typePillText, { color: docStyle.accent }]}>
+                {item.type.toUpperCase()}
+              </Text>
+            </View>
+            <Text style={s.docMeta}>
+              {formatChunks(item.chunkCount)}
+              {!isReady ? `  ·  ${item.status}` : ""}
             </Text>
           </View>
-          <Text style={s.docMeta}>
-            {formatChunks(item.chunkCount)}
-            {!isReady ? `  ·  ${item.status}` : ""}
-          </Text>
         </View>
-      </View>
 
-      {/* Right side */}
-      {selectMode ? (
-        <View style={[s.checkbox, isSelected && s.checkboxChecked]}>
-          {isSelected ? <Text style={s.checkMark}>✓</Text> : null}
-        </View>
-      ) : isReady ? (
-        <View style={s.chevronBox}>
-          <Text style={s.chevron}>›</Text>
-        </View>
-      ) : (
-        <View style={s.processingDot} />
-      )}
+        {/* Right-side element */}
+        {selectMode ? (
+          <View style={[s.checkbox, isSelected && s.checkboxChecked]}>
+            {isSelected ? <Text style={s.checkMark}>✓</Text> : null}
+          </View>
+        ) : isReady ? (
+          <View style={s.chevronBox}>
+            <Text style={s.chevron}>›</Text>
+          </View>
+        ) : (
+          <View style={s.processingDot} />
+        )}
+      </View>
     </Pressable>
   );
 }
@@ -268,9 +267,7 @@ export default function ChatIndexScreen(): React.JSX.Element {
 
   useFocusEffect(
     useCallback(() => {
-      if (token != null) {
-        void fetchDocuments(token);
-      }
+      if (token != null) void fetchDocuments(token);
     }, [token, fetchDocuments]),
   );
 
@@ -284,7 +281,6 @@ export default function ChatIndexScreen(): React.JSX.Element {
   const openUpload = useCallback(() => {
     router.push("/(app)/chat/upload");
   }, []);
-
   const exitSelectMode = useCallback(() => {
     setSelectMode(false);
     setSelectedIds(new Set());
@@ -293,8 +289,7 @@ export default function ChatIndexScreen(): React.JSX.Element {
   const toggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
   }, []);
@@ -321,7 +316,6 @@ export default function ChatIndexScreen(): React.JSX.Element {
   const confirmDelete = useCallback(() => {
     const count = selectedIds.size;
     if (count === 0) return;
-
     Alert.alert(
       count === 1 ? "Delete document?" : `Delete ${count} documents?`,
       "This can't be undone.",
@@ -343,7 +337,6 @@ export default function ChatIndexScreen(): React.JSX.Element {
   const handleSignOut = useCallback(() => {
     void signOut();
   }, [signOut]);
-
   const clearSearch = useCallback(() => setSearchQuery(""), []);
 
   const renderItem = useCallback(
@@ -369,8 +362,6 @@ export default function ChatIndexScreen(): React.JSX.Element {
   );
 
   const displayedCount = filteredDocuments.length;
-
-  // ── Loading & empty states ──────────────────────────────────────────────────
 
   if (isLoading && documents.length === 0) {
     return <LoadingScreen message="Loading your documents…" showLogo={false} />;
@@ -403,8 +394,6 @@ export default function ChatIndexScreen(): React.JSX.Element {
     );
   }
 
-  // ── List header─
-
   const ListHeader = (
     <>
       {!selectMode ? (
@@ -414,8 +403,6 @@ export default function ChatIndexScreen(): React.JSX.Element {
             <Text style={s.greetingName}>{firstName}</Text>
             <Text style={s.greetingWave}>{greeting.wave}</Text>
           </View>
-
-          {/* Knowledge-base card */}
           <View style={s.kbCard}>
             <View style={s.kbIconWrap}>
               <Text style={s.kbIcon}>🗂️</Text>
@@ -428,8 +415,6 @@ export default function ChatIndexScreen(): React.JSX.Element {
               </Text>
             </View>
           </View>
-
-          {/* Search bar */}
           <View style={s.searchWrap}>
             <Text style={s.searchIcon}>🔍</Text>
             <TextInput
@@ -456,7 +441,6 @@ export default function ChatIndexScreen(): React.JSX.Element {
           </View>
         </View>
       ) : null}
-
       <View style={s.listHeader}>
         <Text style={s.listHeaderText}>
           {selectMode
@@ -484,9 +468,8 @@ export default function ChatIndexScreen(): React.JSX.Element {
         <View style={s.footerNoteRow}>
           <View style={s.processingPulse} />
           <Text style={s.footerNoteText}>
-            {processingCount} document
-            {processingCount !== 1 ? "s are" : " is"} still processing — they'll
-            appear here when ready
+            {processingCount} document{processingCount !== 1 ? "s are" : " is"}{" "}
+            still processing — they'll appear here when ready
           </Text>
         </View>
       </View>
@@ -495,7 +478,6 @@ export default function ChatIndexScreen(): React.JSX.Element {
   return (
     <SafeAreaView style={s.container} edges={["top"]}>
       <StatusBar style="light" backgroundColor="#080E1A" translucent={false} />
-
       <Header
         selectMode={selectMode}
         selectedCount={selectedIds.size}
@@ -504,7 +486,6 @@ export default function ChatIndexScreen(): React.JSX.Element {
         onDelete={confirmDelete}
         onCancel={exitSelectMode}
       />
-
       <FlatList
         data={filteredDocuments}
         keyExtractor={keyExtractor}
@@ -528,12 +509,12 @@ export default function ChatIndexScreen(): React.JSX.Element {
   );
 }
 
-// STYLES
+// ─── STYLES ────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#080E1A" },
 
-  // Header
+  // ── Header ──────────────────────────────────────────────────────────────
   header: {
     flexDirection: "row",
     alignItems: "center",
@@ -559,12 +540,7 @@ const s = StyleSheet.create({
     fontWeight: "800",
     letterSpacing: -0.5,
   },
-  headerActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 10 },
   uploadBtn: {
     backgroundColor: "#4F46E5",
     paddingHorizontal: 14,
@@ -582,7 +558,6 @@ const s = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 0.2,
   },
-
   signOutBtn: {
     paddingHorizontal: 10,
     paddingVertical: 8,
@@ -591,7 +566,6 @@ const s = StyleSheet.create({
     borderColor: "#1E2E44",
   },
   signOutText: { color: "#4B5A72", fontSize: 13, fontWeight: "500" },
-
   cancelText: { color: "#818CF8", fontSize: 15 },
   deleteBtn: {
     backgroundColor: "#7F1D1D",
@@ -603,7 +577,7 @@ const s = StyleSheet.create({
   deleteBtnText: { color: "#FCA5A5", fontSize: 14, fontWeight: "600" },
   deleteBtnTextDisabled: { color: "#475569" },
 
-  // Greeting block
+  // ── Greeting ────────────────────────────────────────────────────────────
   greetingBlock: { paddingTop: 22, paddingBottom: 4, gap: 14 },
   greetingLabel: {
     color: "#6B7E99",
@@ -621,7 +595,7 @@ const s = StyleSheet.create({
   },
   greetingWave: { fontSize: 26 },
 
-  // Knowledge-base card
+  // ── Knowledge-base card ─────────────────────────────────────────────────
   kbCard: {
     flexDirection: "row",
     alignItems: "center",
@@ -657,7 +631,7 @@ const s = StyleSheet.create({
   },
   kbLabel: { color: "#4B5A72", fontSize: 13, fontWeight: "500", flex: 1 },
 
-  // Search
+  // ── Search ──────────────────────────────────────────────────────────────
   searchWrap: {
     flexDirection: "row",
     alignItems: "center",
@@ -685,7 +659,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 4,
   },
 
-  // List
+  // ── List chrome ─────────────────────────────────────────────────────────
   listContent: { flexGrow: 1, paddingHorizontal: 16, paddingBottom: 32 },
   listHeader: { paddingTop: 16, paddingBottom: 10 },
   listHeaderText: {
@@ -695,9 +669,7 @@ const s = StyleSheet.create({
     letterSpacing: 1.1,
     textTransform: "uppercase",
   },
-  separator: { height: 8 },
-
-  // No results
+  separator: { height: 10 },
   noResults: { alignItems: "center", paddingTop: 48, gap: 8 },
   noResultsEmoji: { fontSize: 36 },
   noResultsTitle: { color: "#D8E4F5", fontSize: 17, fontWeight: "700" },
@@ -708,36 +680,57 @@ const s = StyleSheet.create({
     lineHeight: 20,
   },
 
-  // Document card
-  docCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#0D1626",
+  // ── Document card ───────────────────────────────────────────────────────
+  cardShell: {
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#162035",
-    overflow: "hidden",
-    minHeight: 76,
-    gap: 12,
-    paddingRight: 14,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+    backgroundColor: "#111827",
+    // overflow: "hidden", // clips accent bar + iconBox to card radius
   },
-  docCardPressed: { backgroundColor: "#111E33", borderColor: "#1E3050" },
-  docCardSelected: { borderColor: "#4F46E5", backgroundColor: "#0F1836" },
-  docCardDisabled: { opacity: 0.45 },
+  cardShellPressed: {
+    backgroundColor: "#162438",
+    borderColor: "rgba(255, 255, 255, 0.14)",
+  },
+  cardShellSelected: { borderColor: "#4F46E5", backgroundColor: "#0F1836" },
+  cardShellDisabled: { opacity: 0.45 },
 
-  accentBar: { width: 3, alignSelf: "stretch", borderRadius: 0 },
+  // Inner row — this is the single source of truth for row layout
+  cardRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    minHeight: 72,
+    backgroundColor: "#111827",
+    borderRadius: 14,
+    overflow: "hidden",
+  },
 
+  // Accent bar: sits flush left, stretches full card height
+  accentBar: {
+    width: 3,
+    alignSelf: "stretch",
+  },
+
+  // Icon box: fixed 44×44
   iconBox: {
     width: 44,
     height: 44,
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
-    marginLeft: 4,
+    marginLeft: 12,
+    marginRight: 12,
+    flexShrink: 0,
+    flexGrow: 0,
   },
   docIcon: { fontSize: 22 },
 
-  docInfo: { flex: 1, paddingVertical: 14, gap: 5 },
+  // Text column
+  docInfo: {
+    flex: 1,
+    paddingVertical: 14,
+    gap: 5,
+  },
   docName: {
     color: "#D8E4F5",
     fontSize: 14,
@@ -754,6 +747,7 @@ const s = StyleSheet.create({
   typePillText: { fontSize: 9, fontWeight: "700", letterSpacing: 0.5 },
   docMeta: { color: "#3A4E66", fontSize: 12 },
 
+  // Right-side elements
   chevronBox: {
     width: 28,
     height: 28,
@@ -761,6 +755,9 @@ const s = StyleSheet.create({
     backgroundColor: "#0F1A2E",
     alignItems: "center",
     justifyContent: "center",
+    marginRight: 14,
+    flexShrink: 0,
+    flexGrow: 0,
   },
   chevron: {
     color: "#4F46E5",
@@ -774,6 +771,9 @@ const s = StyleSheet.create({
     height: 8,
     borderRadius: 4,
     backgroundColor: "#FBBF24",
+    marginRight: 14,
+    flexShrink: 0,
+    flexGrow: 0,
   },
 
   checkbox: {
@@ -784,11 +784,14 @@ const s = StyleSheet.create({
     borderColor: "#2E3D54",
     alignItems: "center",
     justifyContent: "center",
+    marginRight: 14,
+    flexShrink: 0,
+    flexGrow: 0,
   },
   checkboxChecked: { backgroundColor: "#4F46E5", borderColor: "#4F46E5" },
   checkMark: { color: "#FFFFFF", fontSize: 13, fontWeight: "700" },
 
-  // Footer note
+  // ── Footer ──────────────────────────────────────────────────────────────
   footerNote: {
     marginTop: 20,
     backgroundColor: "#0D1626",
@@ -803,6 +806,7 @@ const s = StyleSheet.create({
     height: 8,
     borderRadius: 4,
     backgroundColor: "#FBBF24",
+    flexShrink: 0,
   },
   footerNoteText: { color: "#3A4E66", fontSize: 13, lineHeight: 19, flex: 1 },
 });

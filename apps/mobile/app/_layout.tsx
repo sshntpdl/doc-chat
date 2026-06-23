@@ -12,7 +12,9 @@ import { useAuthStore, setApiBase } from "@docchat/stores";
 import { useState } from "react";
 import { supabase } from "../supabase";
 
-setApiBase(process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:3000");
+setApiBase(
+  process.env.EXPO_PUBLIC_API_URL ?? "https://doc-chat-web-zo8m.vercel.app",
+);
 
 // ─── ROOT LAYOUT ──────────────────────────────────────────────────────────────
 

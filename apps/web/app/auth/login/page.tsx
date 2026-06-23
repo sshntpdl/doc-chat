@@ -1,6 +1,4 @@
 "use client";
-// Full auth page: sign in + sign up in one component, animated slide transition.
-
 import { useState, useEffect, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuthStore } from "@docchat/stores";
@@ -29,13 +27,12 @@ export default function LoginPage() {
   }>({});
   const [countdown, setCountdown] = useState(0);
   const [isPending, startTransition] = useTransition();
+  const [isRedirecting, setIsRedirecting] = useState(false);
 
   // ── Redirect if already authenticated ─────────────────────────────────
-  // This handles the case where the user lands on /login already logged in
-  // (e.g. back navigation). Does NOT handle post-sign-in redirect —
-  // that's done explicitly in handleEmailAuth below.
   useEffect(() => {
     if (isInitialized && user) {
+      setIsRedirecting(true);
       router.replace(redirectTo);
     }
   }, [user, isInitialized, redirectTo, router]);
@@ -80,6 +77,7 @@ export default function LoginPage() {
           if (err) {
             setError(err.message);
           } else {
+            setIsRedirecting(true); // suppress form re-render while navigating
             setMode("magic-sent"); // show "check your email" for verification
           }
           return;
@@ -92,10 +90,10 @@ export default function LoginPage() {
           return;
         }
 
-        // FIX: Explicitly redirect after sign-in instead of relying on
-        // the useEffect above. router.refresh() forces Next.js to
-        // re-run middleware so it sees the new Supabase session cookie,
-        // then replace navigates to the dashboard.
+        // Lock the UI immediately so router.refresh()'s re-render doesn't
+        // flash the empty form back before router.replace() fires.
+        setIsRedirecting(true);
+
         router.refresh();
         router.replace(redirectTo);
       })();
@@ -117,6 +115,7 @@ export default function LoginPage() {
         if (err) {
           setError(err.message);
         } else {
+          setIsRedirecting(true); // suppress form during transition to magic-sent
           setMode("magic-sent");
           setCountdown(30);
         }
@@ -124,7 +123,21 @@ export default function LoginPage() {
     });
   }
 
-  const busy = isLoading || isPending;
+  // busy covers loading, pending transitions, AND active navigation
+  const busy = isLoading || isPending || isRedirecting;
+
+  // ── Full-page redirect spinner ─────────────────────────────────────────
+  if (isRedirecting && mode !== "magic-sent") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[var(--color-background)]">
+        <span
+          className="w-6 h-6 border-2 border-[var(--color-primary)]/30 border-t-[var(--color-primary)] rounded-full animate-spin"
+          aria-label="Redirecting…"
+          role="status"
+        />
+      </div>
+    );
+  }
 
   // ── Magic link sent state ──────────────────────────────────────────────
   if (mode === "magic-sent") {
@@ -163,7 +176,10 @@ export default function LoginPage() {
             {countdown > 0 ? `Resend in ${countdown}s` : "Resend email"}
           </button>
           <button
-            onClick={() => setMode("signin")}
+            onClick={() => {
+              setIsRedirecting(false);
+              setMode("signin");
+            }}
             className="text-sm text-[var(--color-muted)] hover:text-[var(--color-foreground)] transition-colors"
           >
             ← Back to sign in
@@ -202,7 +218,7 @@ export default function LoginPage() {
             </div>
           ))}
         </div>
-        <p className="text-white/50 text-xs">© 2024 DocChat</p>
+        <p className="text-white/50 text-xs">© 2026 DocChat</p>
       </div>
 
       {/* RIGHT: Form panel */}

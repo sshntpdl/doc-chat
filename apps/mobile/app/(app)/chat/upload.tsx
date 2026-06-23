@@ -286,7 +286,7 @@ export default function UploadScreen(): React.JSX.Element {
   // RENDER
 
   return (
-    <SafeAreaView style={s.container} edges={["top"]}>
+    <SafeAreaView style={s.container} edges={["top", "bottom"]}>
       {/* Header */}
       <View style={s.header}>
         <TouchableOpacity
@@ -458,7 +458,7 @@ const s = StyleSheet.create({
   headerTitle: { color: "#F1F5F9", fontSize: 17, fontWeight: "600" },
   headerSpacer: { width: 60 },
 
-  scroll: { flexGrow: 1, padding: 20, gap: 20 },
+  scroll: { flexGrow: 1, padding: 20, paddingBottom: 36, gap: 20 },
 
   emptyState: { minHeight: 360 },
 

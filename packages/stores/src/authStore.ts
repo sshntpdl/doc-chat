@@ -4,6 +4,7 @@ import { immer } from "zustand/middleware/immer";
 import type { User, Session, SupabaseClient } from "@supabase/supabase-js";
 import { createBrowserClient } from "@docchat/supabase";
 import { AppError, ErrorCode } from "@docchat/types";
+import { getApiBase } from "./apiBase";
 
 interface AuthState {
   user: User | null;
@@ -155,7 +156,7 @@ export const useAuthStore = create<AuthStore>()(
 
           // Step 2: POST tokens to our server route so @supabase/ssr writes
           // the cookies in its own chunked format..
-          const res = await fetch("/api/auth/set-session", {
+          const res = await fetch(`${getApiBase()}/api/auth/set-session`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -256,9 +257,9 @@ export const useAuthStore = create<AuthStore>()(
           const supabase = client ?? createBrowserClient();
           await supabase.auth.signOut();
           // Also clear server-side cookies
-          await fetch("/api/auth/set-session", { method: "DELETE" }).catch(
-            () => {},
-          );
+          await fetch(`${getApiBase()}/api/auth/set-session`, {
+            method: "DELETE",
+          }).catch(() => {});
         } finally {
           clearAllStores();
           set((s) => {

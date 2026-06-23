@@ -1,34 +1,3 @@
-// FILE: /apps/web/middleware.ts
-//
-// CHANGES vs previous version:
-//   - Dynamic Content-Security-Policy header (unchanged from before).
-//   - NEW: CORS handling for /api/* routes. This is defense-in-depth on top
-//     of the chatStore.ts fix (which makes the web app call the API
-//     same-origin by default). It matters when something genuinely needs to
-//     call the API cross-origin — a React Native/Expo client, a different
-//     LAN origin than NEXT_PUBLIC_APP_URL, or split web/API domains later.
-//
-// HOW THE NEW CORS HANDLING WORKS:
-//   1. For any request under /api/*, we read the browser's `Origin` header.
-//   2. If it's an OPTIONS preflight, we answer it directly in middleware
-//      with the correct Access-Control-* headers if the origin is allowed
-//      (or with none if not, so the browser blocks it) — and never invoke
-//      the Route Handler at all.
-//   3. For the actual GET/POST/DELETE request, we set the same headers on
-//      the response object before returning it from middleware. Next.js
-//      merges headers set this way into whatever the Route Handler
-//      ultimately returns — the same mechanism the CSP header below
-//      already relies on.
-//
-// NOTE ON COOKIES/AUTH: this app authenticates via Supabase session
-// cookies. Browsers only send cookies on a cross-origin fetch() if the
-// request is made with `credentials: "include"` AND the server responds
-// with a SPECIFIC Access-Control-Allow-Origin (never "*") plus
-// Access-Control-Allow-Credentials: true. We do the server half here. If
-// you ever want the web app itself to call the API cross-origin instead of
-// relying on the same-origin fix in chatStore.ts, you'd also need to add
-// `credentials: "include"` to the fetch() calls there.
-
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { updateSession } from "@docchat/supabase/middleware";
